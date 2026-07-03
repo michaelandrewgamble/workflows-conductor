@@ -2,7 +2,10 @@
   "mcpServers": {
     "conductor": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.js"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.js"],
+      "env": {
+        "CONDUCTOR_DATA_DIR": "${CLAUDE_PLUGIN_DATA}"
+      }
     }
   }
 }

@@ -4,9 +4,78 @@
 // no logic of its own beyond projection (context-cost control, §2.2).
 
 import { createInterface } from 'node:readline'
+import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { listRuns, getRun, getAgents, getScript, saveAsWorkflow } from './reader.js'
 
-const SERVER_INFO = { name: 'conductor', version: '0.3.0' }
+const SERVER_INFO = { name: 'conductor', version: '0.5.0' }
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.claude', 'plugins', 'data', 'conductor-workflows-conductor')
+const STATE_FILE = path.join(DATA_DIR, 'dashboard.json')
+
+async function dashboardState() {
+  try { return JSON.parse(await fs.readFile(STATE_FILE, 'utf8')) } catch { return null }
+}
+async function probe(state) {
+  if (!state?.port || !state?.token) return false
+  try {
+    const res = await fetch(`http://127.0.0.1:${state.port}/health?t=${state.token}`, { signal: AbortSignal.timeout(700) })
+    const body = await res.json()
+    return body?.ok === true && body?.name === 'conductor-dashboard'
+  } catch { return false }
+}
+function urlOf(state) { return `http://127.0.0.1:${state.port}/?t=${state.token}` }
+function openBrowser(url) {
+  if (process.platform === 'darwin') spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
+  else if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref()
+  else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
+}
+
+async function startDashboard({ open = true } = {}) {
+  let state = await dashboardState()
+  if (await probe(state)) {
+    if (open) openBrowser(urlOf(state))
+    return { running: true, alreadyRunning: true, url: urlOf(state), pid: state.pid, opened: open }
+  }
+  const token = randomBytes(16).toString('hex')
+  const port = Number(process.env.CONDUCTOR_PORT || 7423)
+  // Detached + stdio ignored: must never touch this process's MCP stdio
+  // channel, and must survive this MCP server (which dies with the session).
+  const child = spawn(process.execPath, [path.join(HERE, 'dashboard.js')], {
+    detached: true, stdio: 'ignore',
+    env: { ...process.env, CONDUCTOR_TOKEN: token, CONDUCTOR_PORT: String(port), CONDUCTOR_DATA_DIR: DATA_DIR },
+  })
+  child.unref()
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 150))
+    state = await dashboardState()
+    if (state?.token === token && await probe(state)) {
+      if (open) openBrowser(urlOf(state))
+      return { running: true, alreadyRunning: false, url: urlOf(state), pid: state.pid, opened: open }
+    }
+  }
+  // Our spawn lost — maybe a concurrent start (another session) won the port.
+  // If whoever holds it is a healthy conductor dashboard, that's still success.
+  state = await dashboardState()
+  if (await probe(state)) {
+    if (open) openBrowser(urlOf(state))
+    return { running: true, alreadyRunning: true, url: urlOf(state), pid: state.pid, opened: open }
+  }
+  return { running: false, reason: `dashboard did not become healthy on port ${port} within 3s (port held by a non-conductor process?)` }
+}
+
+async function stopDashboard() {
+  const state = await dashboardState()
+  if (!await probe(state)) return { stopped: false, reason: 'no healthy dashboard found' }
+  try {
+    await fetch(`http://127.0.0.1:${state.port}/shutdown?t=${state.token}`, { method: 'POST', signal: AbortSignal.timeout(700) })
+  } catch { /* it exits mid-response */ }
+  return { stopped: true, pid: state.pid }
+}
 
 // Compact row projection for chat contexts — full records stay on disk.
 function projectRow(r) {
@@ -73,6 +142,21 @@ const TOOLS = [
       },
     },
     handler: (a) => saveAsWorkflow(a.runId, a.name, { scope: a.scope ?? 'project', cwd: a.cwd ?? process.cwd(), force: a.force ?? false }),
+  },
+  {
+    name: 'start_dashboard',
+    description: 'Ensure the conductor live dashboard is running (localhost HTTP+SSE, token-authed) and open it in the user\'s browser. Idempotent: returns the existing instance\'s URL if one is healthy. The dashboard shows all projects\' runs with live updates via filesystem watch.',
+    inputSchema: {
+      type: 'object',
+      properties: { open: { type: 'boolean', default: true, description: 'Also open the URL in the default browser' } },
+    },
+    handler: (a) => startDashboard({ open: a.open !== false }),
+  },
+  {
+    name: 'stop_dashboard',
+    description: 'Stop the running conductor dashboard (it also self-stops after 30 idle minutes).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: () => stopDashboard(),
   },
   {
     name: 'get_script',
