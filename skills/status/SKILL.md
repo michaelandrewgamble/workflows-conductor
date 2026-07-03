@@ -1,12 +1,12 @@
 ---
 description: List Claude Code dynamic workflow runs (status, agents, tokens, duration) by reading run records from ~/.claude/projects. Use when the user asks about workflow runs, ultracode runs, run status, or anything /workflows would show.
 argument-hint: "[--all] [--limit N] [runId]"
-allowed-tools: Bash(node *) Read
+allowed-tools: mcp__conductor__list_runs mcp__conductor__get_run mcp__conductor__get_agents mcp__conductor__get_script Bash(node *) Read
 ---
 
 # /conductor:status — list and inspect dynamic workflow runs
 
-Backed by the plugin's reader library. Requires Node ≥ 18 on PATH.
+Backed by the plugin's `conductor` MCP server (reader library underneath). Requires Node ≥ 18 on PATH.
 
 ## Context-cost rules (mandatory)
 
@@ -16,19 +16,18 @@ Backed by the plugin's reader library. Requires Node ≥ 18 on PATH.
 
 ## Procedure
 
-1. List runs (default: current project, limit 10; `--all` for every project):
+1. List runs with the `conductor` MCP server's `list_runs` tool: `{cwd: <absolute project path>, scope: "project" | "all", limit: 10}`. Default scope is the current project; `--all` in the user's arguments means scope "all".
+
+2. If the user names a run ID, drill down with the other conductor tools:
+   - `get_run {runId}` — metadata + result preview (never contains the script)
+   - `get_agents {runId}` — per-agent state and transcript file paths
+   - `get_script {runId}` — full script source (large; only on explicit request)
+
+Fallback: if the conductor MCP tools are unavailable in this session (server not loaded), use the identical CLI:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" list --cwd "$PWD" --limit 10
-node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" list --cwd "$PWD" --all --limit 20
-```
-
-2. If the user names a run ID, drill down:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" get <runId>       # metadata + result preview
-node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" agents <runId>    # per-agent state + transcript paths
-node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" script <runId>    # full script source (large — only on request)
+node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" list --cwd "$PWD" [--all] [--limit N]
+node "${CLAUDE_PLUGIN_ROOT}/server/cli.js" <get|agents|script> <runId>
 ```
 
 3. Render a markdown table from `runs`: Run ID · Name · Status · Agents · Tokens · Duration · When · Expires. Interpretation rules:
