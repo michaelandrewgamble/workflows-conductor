@@ -39,9 +39,16 @@ All five test forms rendered as clickable in Cursor's Claude chat panel (2026-07
 
 Scope caveat: this verifies *rendering*, not end-to-end behavior on click — in particular `vscode://` links won't open Cursor (only the `cursor://` scheme is registered there) and `command:` execution wasn't observed. For the plan this is enough: M4's dashboard URL is clickable (and auto-open makes it belt-and-braces), and M5 deep links just need per-host scheme selection as already specified.
 
-## Spike 4 — SubagentStart/SubagentStop hook payloads ⏳ INSTRUMENTED, AWAITING EVENTS
+## Spike 4 — SubagentStart/SubagentStop hook payloads ✅ CONFIRMED (better than hoped)
 
-The installed plugin's `hooks/hooks.json` appends every SubagentStart/SubagentStop payload to `~/.claude/plugins/data/<id>/events.jsonl`. Plugin is installed (user scope) and loaded — `/conductor:status` ran successfully in a fresh extension session on 2026-07-03 (M0 exit criterion met) — but that run spawned no subagents, so no events yet. Completes the first time a plugin-enabled session runs a subagent or workflow task; then inspect the log for whether workflow subagents are identifiable (docs don't say — the payload has `agent_type`, and workflow agent transcripts use `agentType: workflow-subagent` in their meta files).
+First captured events (2026-07-03, a workflow subagent from a real run) settle every open question:
+
+- **Workflow subagents are identifiable**: `agent_type: "workflow-subagent"` in both Start and Stop payloads.
+- **Run ID is extractable**: SubagentStop carries `agent_transcript_path` pointing into `.../subagents/workflows/<runId>/agent-<id>.jsonl`.
+- **Live run status rides along**: SubagentStop includes a `background_tasks` array with `{id, type: "workflow", status: "running", name, description}` — actual live state that the disk never persists. This upgrades the M4b hook sidecar from liveness hints to real status tracking.
+- Also present: `last_assistant_message`, `effort`, `permission_mode`, `session_id`, `cwd`.
+- **Hooks hot-loaded** into an already-running session after plugin install — no restart was needed for hook activation.
+- `${CLAUDE_PLUGIN_DATA}` resolved to `~/.claude/plugins/data/conductor-workflows-conductor/` (id = plugin-marketplace compound), created on demand as documented.
 
 ## M2/M3 field notes (2026-07-03, verified in Cursor)
 
