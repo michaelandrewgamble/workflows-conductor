@@ -370,12 +370,19 @@ export async function saveAsWorkflow(runId, name, {
     return { saved: false, reason: `${target} exists — pass force to overwrite`, target }
   }
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(target, src.script)
 
-  const metaName = src.script.match(/name:\s*['"]([^'"]+)['"]/)?.[1] ?? null
+  // Saved workflows register as commands by meta.name, NOT filename
+  // (verified empirically 2026-07-03) — rewrite it to the requested name.
+  const metaNameRe = /(export\s+const\s+meta\s*=\s*\{[^]*?name\s*:\s*)(['"])([^'"]*)\2/
+  const m = src.script.match(metaNameRe)
+  const script = m ? src.script.replace(metaNameRe, `$1$2${name}$2`) : src.script
+  await fs.writeFile(target, script)
+
   return {
     saved: true, target, scope, source: src.source,
     invokeAs: `/${name}`,
-    note: metaName && metaName !== name ? `script meta.name is "${metaName}" but the command name comes from the filename: /${name}` : null,
+    note: m
+      ? (m[3] !== name ? `script meta.name rewritten "${m[3]}" → "${name}" (commands register by meta.name)` : null)
+      : `no meta.name found to rewrite — the command may register under the script's internal name, not /${name}`,
   }
 }

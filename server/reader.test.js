@@ -22,7 +22,7 @@ async function write(p, content) {
 function record(over = {}) {
   return {
     runId: 'wf_test', taskId: 't1', workflowName: 'test-wf', status: 'completed',
-    summary: 'a test run', script: 'export const meta = {}\nreturn 1', scriptPath: '/nonexistent/x.js',
+    summary: 'a test run', script: "export const meta = { name: 'test-wf', description: 'd' }\nreturn 1", scriptPath: '/nonexistent/x.js',
     phases: [{ title: 'P1' }], workflowProgress: [{ type: 'workflow_phase', index: 1, title: 'P1' }],
     agentCount: 2, defaultModel: 'claude-x', startTime: now - 60000, timestamp: new Date(now - 1000).toISOString(),
     durationMs: 59000, totalTokens: 1234, totalToolCalls: 5, logs: [], result: { done: true },
@@ -185,7 +185,9 @@ test('saveAsWorkflow: project scope creates cwd/.claude/workflows, refuses overw
   assert.equal(res.saved, true)
   assert.equal(res.target, path.join(cwdA, '.claude', 'workflows', 'my-saved.js'))
   assert.equal(res.invokeAs, '/my-saved')
-  assert.ok((await fs.readFile(res.target, 'utf8')).startsWith('export const meta'))
+  const saved = await fs.readFile(res.target, 'utf8')
+  assert.ok(saved.startsWith('export const meta'))
+  assert.match(saved, /name:\s*'my-saved'/)               // meta.name rewritten to command name
 
   const again = await saveAsWorkflow('wf_ok1', 'my-saved', { projectsDir, cwd: cwdA })
   assert.equal(again.saved, false)

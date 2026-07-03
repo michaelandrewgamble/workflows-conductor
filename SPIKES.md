@@ -43,6 +43,12 @@ Scope caveat: this verifies *rendering*, not end-to-end behavior on click — in
 
 The installed plugin's `hooks/hooks.json` appends every SubagentStart/SubagentStop payload to `~/.claude/plugins/data/<id>/events.jsonl`. Plugin is installed (user scope) and loaded — `/conductor:status` ran successfully in a fresh extension session on 2026-07-03 (M0 exit criterion met) — but that run spawned no subagents, so no events yet. Completes the first time a plugin-enabled session runs a subagent or workflow task; then inspect the log for whether workflow subagents are identifiable (docs don't say — the payload has `agent_type`, and workflow agent transcripts use `agentType: workflow-subagent` in their meta files).
 
+## M2/M3 field notes (2026-07-03, verified in Cursor)
+
+- **Saved workflows register as commands by `meta.name`, NOT filename** — contradicts the docs-derived assumption. Observed: a file saved as `arch-critique.js` with `meta.name: 'conductor-arch-critique'` registered as `/conductor-arch-critique`; after rewriting meta.name, it re-registered as `/arch-critique` immediately (no restart — `.claude/workflows` hot-reloads). `saveAsWorkflow` now rewrites meta.name to the requested command name.
+- **Plugin MCP tool namespace**: tools surface as `mcp__plugin_<pluginName>_<serverName>__<tool>` (e.g. `mcp__plugin_conductor_conductor__list_runs`), not `mcp__<serverName>__<tool>`. Skill `allowed-tools` updated to the real names.
+- Plugin updates are version-gated: `claude plugin update` is a no-op unless plugin.json `version` is bumped — bump every iteration.
+
 ## M0 field notes (from the first real install + run)
 
 - `/plugin` slash commands are NOT available in the extension chat ("/plugin isn't available in this environment"); `claude plugin …` CLI commands work and installs are user-scoped, shared across surfaces. README updated.

@@ -1,7 +1,7 @@
 ---
 description: Save a Claude Code dynamic workflow run's script as a reusable slash-command workflow (the "s" action from the CLI /workflows panel). Use when the user wants to keep, save, or reuse a workflow run.
 argument-hint: "<runId> <name> [--user] [--force]"
-allowed-tools: mcp__conductor__save_workflow mcp__conductor__list_runs Bash(node *)
+allowed-tools: mcp__plugin_conductor_conductor__save_workflow mcp__plugin_conductor_conductor__list_runs Bash(node *)
 ---
 
 # /conductor:save — save a run as a reusable workflow

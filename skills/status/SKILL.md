@@ -1,7 +1,7 @@
 ---
 description: List Claude Code dynamic workflow runs (status, agents, tokens, duration) by reading run records from ~/.claude/projects. Use when the user asks about workflow runs, ultracode runs, run status, or anything /workflows would show.
 argument-hint: "[--all] [--limit N] [runId]"
-allowed-tools: mcp__conductor__list_runs mcp__conductor__get_run mcp__conductor__get_agents mcp__conductor__get_script Bash(node *) Read
+allowed-tools: mcp__plugin_conductor_conductor__list_runs mcp__plugin_conductor_conductor__get_run mcp__plugin_conductor_conductor__get_agents mcp__plugin_conductor_conductor__get_script Bash(node *) Read
 ---
 
 # /conductor:status — list and inspect dynamic workflow runs

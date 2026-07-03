@@ -1,5 +1,5 @@
 export const meta = {
-  name: 'spike-inline-invoke',
+  name: 'conductor-spike-ping',
   description: 'M0 spike: verify the Workflow tool accepts an externally supplied script file via scriptPath',
   phases: [{ title: 'Ping', detail: 'single trivial agent proves external script execution' }],
 }
