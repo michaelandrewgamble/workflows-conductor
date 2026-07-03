@@ -14,7 +14,7 @@ const PORT = Number(process.env.CONDUCTOR_PORT || 7423)
 const TOKEN = process.env.CONDUCTOR_TOKEN
 const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.claude', 'plugins', 'data', 'conductor-workflows-conductor')
 const IDLE_LIMIT_MS = 30 * 60 * 1000
-const VERSION = '0.5.0'
+const VERSION = '0.6.0'
 
 if (!TOKEN) { console.error('CONDUCTOR_TOKEN required'); process.exit(2) }
 

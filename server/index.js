@@ -12,7 +12,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { listRuns, getRun, getAgents, getScript, saveAsWorkflow } from './reader.js'
 
-const SERVER_INFO = { name: 'conductor', version: '0.5.0' }
+const SERVER_INFO = { name: 'conductor', version: '0.6.0' }
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.claude', 'plugins', 'data', 'conductor-workflows-conductor')
 const STATE_FILE = path.join(DATA_DIR, 'dashboard.json')
@@ -142,6 +142,23 @@ const TOOLS = [
       },
     },
     handler: (a) => saveAsWorkflow(a.runId, a.name, { scope: a.scope ?? 'project', cwd: a.cwd ?? process.cwd(), force: a.force ?? false }),
+  },
+  {
+    name: 'export_script',
+    description: 'Write a run\'s workflow script to a file and return the path — for re-running via the Workflow tool\'s scriptPath without pulling the (large) source into context.',
+    inputSchema: {
+      type: 'object', required: ['runId'],
+      properties: { runId: { type: 'string' } },
+    },
+    handler: async (a) => {
+      const src = await getScript(a.runId)
+      if (!src.found) return { exported: false, reason: src.reason }
+      const dir = path.join(DATA_DIR, 'rerun')
+      await fs.mkdir(dir, { recursive: true })
+      const target = path.join(dir, `${a.runId}.js`)
+      await fs.writeFile(target, src.script)
+      return { exported: true, scriptPath: target, source: src.source, bytes: src.script.length }
+    },
   },
   {
     name: 'start_dashboard',
