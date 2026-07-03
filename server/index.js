@@ -4,7 +4,7 @@
 // no logic of its own beyond projection (context-cost control, §2.2).
 
 import { createInterface } from 'node:readline'
-import { listRuns, getRun, getAgents, getScript } from './reader.js'
+import { listRuns, getRun, getAgents, getScript, saveAsWorkflow } from './reader.js'
 
 const SERVER_INFO = { name: 'conductor', version: '0.3.0' }
 
@@ -58,6 +58,21 @@ const TOOLS = [
       properties: { runId: { type: 'string' } },
     },
     handler: (a) => getAgents(a.runId),
+  },
+  {
+    name: 'save_workflow',
+    description: 'Save a run\'s workflow script as a reusable slash command (mirrors pressing "s" in the CLI /workflows panel). Project scope writes to the nearest .claude/workflows/; user scope to ~/.claude/workflows/. The saved workflow is invoked as /<name> in later sessions.',
+    inputSchema: {
+      type: 'object', required: ['runId', 'name'],
+      properties: {
+        runId: { type: 'string' },
+        name: { type: 'string', description: 'Command name, kebab-case' },
+        scope: { type: 'string', enum: ['project', 'user'], default: 'project' },
+        cwd: { type: 'string', description: 'Project path for scope=project' },
+        force: { type: 'boolean', default: false, description: 'Overwrite an existing saved workflow of the same name' },
+      },
+    },
+    handler: (a) => saveAsWorkflow(a.runId, a.name, { scope: a.scope ?? 'project', cwd: a.cwd ?? process.cwd(), force: a.force ?? false }),
   },
   {
     name: 'get_script',

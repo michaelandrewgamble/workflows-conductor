@@ -330,3 +330,52 @@ export async function getScript(runId, { projectsDir = DEFAULT_PROJECTS_DIR } = 
   }
   return { found: false, runId, reason: 'no inline script, scriptPath unreadable, no scripts/ copy' }
 }
+
+// Mirrors the CLI's `s` (save) semantics: project scope writes to the nearest
+// existing .claude/workflows/ between cwd and the repo root (creating
+// cwd/.claude/workflows/ if none exists — v2.1.178 monorepo rule); user scope
+// writes to ~/.claude/workflows/. Saved workflows become /<name> commands.
+export async function saveAsWorkflow(runId, name, {
+  projectsDir = DEFAULT_PROJECTS_DIR,
+  cwd = process.cwd(),
+  scope = 'project',            // 'project' | 'user'
+  force = false,
+  homedir = os.homedir(),
+} = {}) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+    return { saved: false, reason: `invalid name "${name}": use kebab-case (letters, digits, hyphens)` }
+  }
+  const src = await getScript(runId, { projectsDir })
+  if (!src.found) return { saved: false, reason: `script not recoverable for ${runId}: ${src.reason}` }
+
+  let dir
+  if (scope === 'user') {
+    dir = path.join(homedir, '.claude', 'workflows')
+  } else {
+    dir = null
+    let probe = cwd
+    while (true) {
+      const candidate = path.join(probe, '.claude', 'workflows')
+      if (await safeStat(candidate)) { dir = candidate; break }
+      const atRepoRoot = await safeStat(path.join(probe, '.git'))
+      const parent = path.dirname(probe)
+      if (atRepoRoot || parent === probe) break
+      probe = parent
+    }
+    if (!dir) dir = path.join(cwd, '.claude', 'workflows')
+  }
+
+  const target = path.join(dir, `${name}.js`)
+  if (!force && await safeStat(target)) {
+    return { saved: false, reason: `${target} exists — pass force to overwrite`, target }
+  }
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(target, src.script)
+
+  const metaName = src.script.match(/name:\s*['"]([^'"]+)['"]/)?.[1] ?? null
+  return {
+    saved: true, target, scope, source: src.source,
+    invokeAs: `/${name}`,
+    note: metaName && metaName !== name ? `script meta.name is "${metaName}" but the command name comes from the filename: /${name}` : null,
+  }
+}

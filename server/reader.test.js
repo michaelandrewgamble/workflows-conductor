@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { listRuns, getRun, getAgents, getScript, encodeCwd } from './reader.js'
+import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd } from './reader.js'
 
 let root, projectsDir, cwdA, cwdB
 const now = Date.now()
@@ -178,4 +178,44 @@ test('getScript prefers inline script from the record', async () => {
   assert.equal(res.found, true)
   assert.equal(res.source, 'inline')
   assert.ok(res.script.startsWith('export const meta'))
+})
+
+test('saveAsWorkflow: project scope creates cwd/.claude/workflows, refuses overwrite, force wins', async () => {
+  const res = await saveAsWorkflow('wf_ok1', 'my-saved', { projectsDir, cwd: cwdA })
+  assert.equal(res.saved, true)
+  assert.equal(res.target, path.join(cwdA, '.claude', 'workflows', 'my-saved.js'))
+  assert.equal(res.invokeAs, '/my-saved')
+  assert.ok((await fs.readFile(res.target, 'utf8')).startsWith('export const meta'))
+
+  const again = await saveAsWorkflow('wf_ok1', 'my-saved', { projectsDir, cwd: cwdA })
+  assert.equal(again.saved, false)
+  assert.match(again.reason, /exists/)
+
+  const forced = await saveAsWorkflow('wf_ok1', 'my-saved', { projectsDir, cwd: cwdA, force: true })
+  assert.equal(forced.saved, true)
+})
+
+test('saveAsWorkflow: nearest existing .claude/workflows wins over cwd (monorepo rule)', async () => {
+  const repoRoot = path.join(root, 'repos', 'mono')
+  const nested = path.join(repoRoot, 'packages', 'app')
+  await fs.mkdir(path.join(repoRoot, '.git'), { recursive: true })
+  await fs.mkdir(path.join(repoRoot, '.claude', 'workflows'), { recursive: true })
+  await fs.mkdir(nested, { recursive: true })
+  const res = await saveAsWorkflow('wf_ok1', 'mono-flow', { projectsDir, cwd: nested })
+  assert.equal(res.saved, true)
+  assert.equal(res.target, path.join(repoRoot, '.claude', 'workflows', 'mono-flow.js'))
+})
+
+test('saveAsWorkflow: user scope writes to ~/.claude/workflows; invalid names rejected', async () => {
+  const fakeHome = path.join(root, 'fakehome')
+  const res = await saveAsWorkflow('wf_ok1', 'user-flow', { projectsDir, cwd: cwdA, scope: 'user', homedir: fakeHome })
+  assert.equal(res.saved, true)
+  assert.equal(res.target, path.join(fakeHome, '.claude', 'workflows', 'user-flow.js'))
+
+  const bad = await saveAsWorkflow('wf_ok1', '../evil', { projectsDir, cwd: cwdA })
+  assert.equal(bad.saved, false)
+  assert.match(bad.reason, /invalid name/)
+
+  const missing = await saveAsWorkflow('wf_nope', 'x-flow', { projectsDir, cwd: cwdA })
+  assert.equal(missing.saved, false)
 })
