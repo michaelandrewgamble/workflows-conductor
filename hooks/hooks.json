@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p \"$CLAUDE_PLUGIN_DATA\" && jq -c '. + {conductor_logged_at: (now | todate)}' >> \"$CLAUDE_PLUGIN_DATA/events.jsonl\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p \"$CLAUDE_PLUGIN_DATA\" && jq -c '. + {conductor_logged_at: (now | todate)}' >> \"$CLAUDE_PLUGIN_DATA/events.jsonl\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

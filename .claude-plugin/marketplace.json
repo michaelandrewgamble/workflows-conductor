@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-marketplace.json",
+  "name": "workflows-conductor",
+  "description": "Workflow run management for Claude Code surfaces without the /workflows TUI",
+  "owner": {
+    "name": "Michael Gamble",
+    "email": "michaelandrewgamble@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "conductor",
+      "source": "./",
+      "description": "List, inspect, save, and re-run Claude Code dynamic workflow runs from the VS Code/Cursor extension.",
+      "category": "productivity",
+      "tags": ["workflows", "monitoring"]
+    }
+  ]
+}
