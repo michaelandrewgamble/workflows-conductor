@@ -134,7 +134,14 @@ const server = http.createServer(async (req, res) => {
   // /health pings could hold the server open past the idle limit forever.
   if (authed) lastActivity = Date.now()
   if (url.pathname === '/health') return json(res, { ok: authed, name: 'conductor-dashboard', version: VERSION, pid: process.pid })
-  if (!authed) return json(res, { error: 'unauthorized' }, 401)
+  if (!authed) {
+    // A stale tab (rotated/wrong token) should see words, not silent JSON.
+    if (url.pathname === '/' ) {
+      res.writeHead(401, { 'content-type': 'text/html' })
+      return res.end('<body style="font:14px ui-sans-serif;padding:40px;color:#444"><h3>Workflows Conductor — link expired</h3>This dashboard link\'s token is no longer valid (the dashboard restarted with a new one). Run <code>/conductor:dashboard</code> in any Claude Code session to open a fresh link.</body>')
+    }
+    return json(res, { error: 'unauthorized' }, 401)
+  }
 
   try {
     if (url.pathname === '/') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(PAGE) }

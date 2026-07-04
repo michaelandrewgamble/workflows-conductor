@@ -41,7 +41,9 @@ async function startDashboard({ open = true } = {}) {
     if (open) openBrowser(urlOf(state))
     return { running: true, alreadyRunning: true, url: urlOf(state), pid: state.pid, opened: open }
   }
-  const token = randomBytes(16).toString('hex')
+  // Reuse the previous token when restarting: rotating it kills every open
+  // dashboard tab (they silently 401). Fresh token only on first-ever start.
+  const token = (state?.token && /^[a-f0-9]{16,64}$/.test(state.token)) ? state.token : randomBytes(16).toString('hex')
   const port = Number(process.env.CONDUCTOR_PORT || 7423)
   // Self-heal: if the port is held by an orphaned conductor dashboard whose
   // token we lost (stale/clobbered state file), identify it via the
