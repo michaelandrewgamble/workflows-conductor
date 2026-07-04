@@ -175,12 +175,12 @@ const TOOLS = [
   },
   {
     name: 'start_dashboard',
-    description: 'Ensure the conductor live dashboard is running (localhost HTTP+SSE, token-authed) and open it in the user\'s browser. Idempotent: returns the existing instance\'s URL if one is healthy. The dashboard shows all projects\' runs with live updates via filesystem watch.',
+    description: 'Ensure the conductor live dashboard is running (localhost HTTP+SSE, token-authed) and return its stable URL. Idempotent: returns the existing instance\'s URL if one is healthy. The URL/token are stable across restarts, so a tab opened inside the IDE (e.g. Cursor/VS Code Simple Browser) keeps working permanently. Pass open:true only if the user explicitly wants their external browser.',
     inputSchema: {
       type: 'object',
-      properties: { open: { type: 'boolean', default: true, description: 'Also open the URL in the default browser' } },
+      properties: { open: { type: 'boolean', default: false, description: 'Also open the URL in the default EXTERNAL browser (off by default — most users view it inside the IDE)' } },
     },
-    handler: (a) => startDashboard({ open: a.open !== false }),
+    handler: (a) => startDashboard({ open: a.open === true }),
   },
   {
     name: 'stop_dashboard',
