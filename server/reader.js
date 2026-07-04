@@ -331,6 +331,226 @@ export async function getScript(runId, { projectsDir = DEFAULT_PROJECTS_DIR } = 
   return { found: false, runId, reason: 'no inline script, scriptPath unreadable, no scripts/ copy' }
 }
 
+// ---------------------------------------------------------------------------
+// Live-agent observability (0.7 / F2). Same rules as everything above: the
+// transcript and hook-event schemas are undocumented and observed to vary —
+// degrade per-record, never throw past the function boundary.
+// ---------------------------------------------------------------------------
+
+const FRESH_WINDOW_MS = 10 * 1000
+
+// Tail-read a (possibly large, possibly growing) per-agent transcript and
+// reduce it to a live view: recent events, token burn, current action.
+// Reads at most the last maxBytes; drops the leading partial line when the
+// window starts mid-file and any torn (in-progress) trailing line.
+export async function parseTranscriptTail(filePath, { maxBytes = 65536, maxEvents = 30 } = {}) {
+  const out = { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null }
+  let text = null
+  let startedMidFile = false
+  let fh = null
+  try {
+    fh = await fs.open(filePath, 'r')
+    const st = await fh.stat()
+    // Read one extra byte before the window: if it's '\n', the window starts
+    // exactly at a line boundary and the first segment is COMPLETE — keep it.
+    const offset = Math.max(0, st.size - maxBytes - 1)
+    startedMidFile = offset > 0 || st.size > maxBytes
+    const len = st.size - offset
+    if (len <= 0) return out
+    const buf = Buffer.alloc(len)
+    const { bytesRead } = await fh.read(buf, 0, len, offset)
+    text = buf.subarray(0, bytesRead).toString('utf8')
+  } catch {
+    return out
+  } finally {
+    if (fh) await fh.close().catch(() => {})
+  }
+
+  const segments = text.split('\n')
+  // With the extra byte, segments[0] is either '' (window began at a line
+  // boundary) or a genuine partial line — dropping it is correct either way.
+  if (startedMidFile) segments.shift()
+  const events = []
+  let tokens = null
+  for (const seg of segments) {
+    if (!seg.trim()) continue
+    let line
+    try { line = JSON.parse(seg) } catch { continue }      // torn/garbage line
+    if (typeof line !== 'object' || line === null) continue
+    const at = typeof line.timestamp === 'string' ? line.timestamp : null
+    if (at) {
+      if (!out.firstTimestamp) out.firstTimestamp = at     // earliest SEEN in window, not true start
+      out.lastTimestamp = at
+    }
+    if (line.type === 'assistant' && Array.isArray(line.message?.content)) {
+      const ot = line.message?.usage?.output_tokens
+      if (typeof ot === 'number') tokens = (tokens ?? 0) + ot
+      for (const block of line.message.content) {
+        if (!block || typeof block !== 'object') continue
+        if (block.type === 'tool_use') {
+          let summary
+          try { summary = JSON.stringify(block.input ?? null) ?? 'null' } catch { summary = String(block.input) }
+          events.push({ kind: 'tool', at, tool: block.name ?? null, summary: summary.slice(0, 120) })
+        } else if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+          events.push({ kind: 'text', at, snippet: block.text.slice(0, 160) })
+        }
+      }
+    } else if (line.type === 'user' && Array.isArray(line.message?.content) &&
+               line.message.content.some(b => b && b.type === 'tool_result')) {
+      events.push({ kind: 'tool-result', at })             // no content: results can be huge/secret
+    }
+  }
+  out.outputTokens = tokens
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'tool' || events[i].kind === 'text') { out.currentAction = events[i]; break }
+  }
+  out.events = events.slice(-maxEvents)
+  return out
+}
+
+// String-aware balanced-delimiter scan: returns the source between openIdx's
+// delimiter and its match (exclusive), or null when unbalanced.
+function scanBalanced(src, openIdx, open, close) {
+  let depth = 0
+  let quote = null
+  for (let i = openIdx; i < src.length; i++) {
+    const c = src[i]
+    if (quote) {
+      if (c === '\\') i++
+      else if (c === quote) quote = null
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; continue }
+    if (c === open) depth++
+    else if (c === close) {
+      depth--
+      if (depth === 0) return src.slice(openIdx + 1, i)
+    }
+  }
+  return null
+}
+
+function stringProp(objSrc, key) {
+  const m = objSrc.match(new RegExp(`(?:^|[,{\\s])${key}\\s*:\\s*(['"\`])((?:\\\\.|(?!\\1).)*)\\1`))
+  return m ? m[2].replace(/\\(['"`\\])/g, '$1') : null
+}
+
+// Extract meta.phases ({title, detail?}[]) from a workflow script's
+// `export const meta = {...}` WITHOUT executing it. Tolerant: [] on anything
+// absent or unparseable.
+export function parsePhases(scriptSource) {
+  try {
+    if (typeof scriptSource !== 'string') return []
+    const metaStart = scriptSource.search(/export\s+const\s+meta\s*=\s*\{/)
+    if (metaStart < 0) return []
+    const metaBody = scanBalanced(scriptSource, scriptSource.indexOf('{', metaStart), '{', '}')
+    if (metaBody === null) return []
+    const pm = metaBody.match(/phases\s*:\s*\[/)
+    if (!pm) return []
+    const arrBody = scanBalanced(metaBody, metaBody.indexOf('[', pm.index), '[', ']')
+    if (arrBody === null) return []
+    const phases = []
+    for (let i = 0; i < arrBody.length; i++) {
+      if (arrBody[i] !== '{') continue
+      const obj = scanBalanced(arrBody, i, '{', '}')
+      if (obj === null) break
+      i += obj.length + 1
+      const title = stringProp(obj, 'title')
+      if (title === null) continue                         // phase without a title: skip, don't fail
+      const detail = stringProp(obj, 'detail')
+      phases.push(detail !== null ? { title, detail } : { title })
+    }
+    return phases
+  } catch { return [] }
+}
+
+// Live merge for one run. Priority: journal started/result pairing (state) →
+// hook events log (precise startedAt) → transcript stat + tail (activity,
+// current action, token burn, fallback startedAt). Script source is parsed
+// for phases but never returned.
+export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR, dataDir = null, now = Date.now() } = {}) {
+  const agents = new Map()
+  const get = id => {
+    if (!agents.has(id)) agents.set(id, { agentId: id, state: null, startedAt: null, lastActivityAt: null, currentAction: null, outputTokens: null, transcriptPath: null })
+    return agents.get(id)
+  }
+  let found = false
+
+  // 1. Journal pairing + transcript discovery.
+  for (const dir of await findRunAgentDirs(projectsDir)) {
+    if (path.basename(dir) !== runId) continue
+    found = true
+    const { records } = await parseJsonl(path.join(dir, 'journal.jsonl'))
+    for (const rec of records) {
+      if (!rec || !rec.agentId) continue
+      const a = get(rec.agentId)
+      if (rec.type === 'started' && a.state !== 'done') a.state = 'running'
+      if (rec.type === 'result') a.state = 'done'
+    }
+    for (const f of await safeReaddir(dir)) {
+      const m = f.name.match(/^agent-(.+)\.jsonl$/)
+      if (m) get(m[1]).transcriptPath = path.join(dir, f.name)
+    }
+  }
+
+  // 2. Hook events: SubagentStart gives precise startedAt. A Start carries no
+  // run info, so only use it when its agent_id is already known to this run
+  // (journal/transcripts) or a Stop's transcript path ties it to this runId.
+  if (dataDir) {
+    const { records } = await parseJsonl(path.join(dataDir, 'events.jsonl'))
+    const stopMatched = new Set()
+    for (const e of records) {
+      if (e && e.hook_event_name === 'SubagentStop' && e.agent_id &&
+          typeof e.agent_transcript_path === 'string' &&
+          e.agent_transcript_path.includes(`${path.sep}workflows${path.sep}${runId}${path.sep}`)) {
+        stopMatched.add(e.agent_id)
+      }
+    }
+    for (const e of records) {
+      if (!e || e.hook_event_name !== 'SubagentStart' || !e.agent_id) continue
+      if (typeof e.conductor_logged_at !== 'string') continue
+      if (!agents.has(e.agent_id) && !stopMatched.has(e.agent_id)) continue
+      const a = get(e.agent_id)
+      if (!a.startedAt) a.startedAt = e.conductor_logged_at
+    }
+  }
+
+  // 3. Transcript stat + tail per agent.
+  for (const a of agents.values()) {
+    if (!a.transcriptPath) continue
+    const st = await safeStat(a.transcriptPath)
+    if (st) a.lastActivityAt = new Date(st.mtimeMs).toISOString()
+    const tail = await parseTranscriptTail(a.transcriptPath)
+    a.currentAction = tail.currentAction
+    a.outputTokens = tail.outputTokens
+    if (!a.startedAt && tail.firstTimestamp) a.startedAt = tail.firstTimestamp  // window start ≈ start; hook data is preferred
+  }
+
+  // 4. Phases from the run's script (source never returned).
+  const src = await getScript(runId, { projectsDir })
+  const phases = src.found ? parsePhases(src.script) : []
+
+  const rows = [...agents.values()].map(a => {
+    const startedMs = a.startedAt ? Date.parse(a.startedAt) : NaN
+    const lastMs = a.lastActivityAt ? Date.parse(a.lastActivityAt) : NaN
+    const endMs = a.state === 'running' ? now : lastMs
+    return {
+      agentId: a.agentId,
+      state: a.state,
+      startedAt: a.startedAt,
+      elapsedMs: Number.isFinite(startedMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startedMs) : null,
+      lastActivityAt: a.lastActivityAt,
+      quietMs: a.state === 'running' && Number.isFinite(lastMs) ? Math.max(0, now - lastMs) : null,
+      isFresh: Number.isFinite(lastMs) && now - lastMs < FRESH_WINDOW_MS,
+      currentAction: a.currentAction,
+      outputTokens: a.outputTokens,
+      transcriptPath: a.transcriptPath,
+    }
+  })
+
+  return { runId, found, phases, agents: rows, script: undefined }
+}
+
 // Mirrors the CLI's `s` (save) semantics: project scope writes to the nearest
 // existing .claude/workflows/ between cwd and the repo root (creating
 // cwd/.claude/workflows/ if none exists — v2.1.178 monorepo rule); user scope

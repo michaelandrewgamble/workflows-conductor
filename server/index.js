@@ -12,7 +12,7 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { listRuns, getRun, getAgents, getScript, saveAsWorkflow } from './reader.js'
 
-const SERVER_INFO = { name: 'conductor', version: '0.6.0' }
+const SERVER_INFO = { name: 'conductor', version: '0.7.0' }
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.claude', 'plugins', 'data', 'conductor-workflows-conductor')
 const STATE_FILE = path.join(DATA_DIR, 'dashboard.json')
@@ -43,6 +43,17 @@ async function startDashboard({ open = true } = {}) {
   }
   const token = randomBytes(16).toString('hex')
   const port = Number(process.env.CONDUCTOR_PORT || 7423)
+  // Self-heal: if the port is held by an orphaned conductor dashboard whose
+  // token we lost (stale/clobbered state file), identify it via the
+  // unauthenticated /health identity fields and reclaim the port.
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(700) })
+    const id = await res.json()
+    if (id?.name === 'conductor-dashboard' && Number.isInteger(id.pid)) {
+      try { process.kill(id.pid) } catch { /* already gone or not ours */ }
+      await new Promise(r => setTimeout(r, 300))
+    }
+  } catch { /* port free — normal path */ }
   // Detached + stdio ignored: must never touch this process's MCP stdio
   // channel, and must survive this MCP server (which dies with the session).
   const child = spawn(process.execPath, [path.join(HERE, 'dashboard.js')], {

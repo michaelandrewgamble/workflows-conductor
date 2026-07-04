@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd } from './reader.js'
+import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd, parseTranscriptTail, parsePhases, getLiveAgents } from './reader.js'
 
 let root, projectsDir, cwdA, cwdB
 const now = Date.now()
@@ -206,6 +206,139 @@ test('saveAsWorkflow: nearest existing .claude/workflows wins over cwd (monorepo
   const res = await saveAsWorkflow('wf_ok1', 'mono-flow', { projectsDir, cwd: nested })
   assert.equal(res.saved, true)
   assert.equal(res.target, path.join(repoRoot, '.claude', 'workflows', 'mono-flow.js'))
+})
+
+// --- live-agent observability (0.7) ------------------------------------------
+// Transcript fixture builders modeled on real agent-<id>.jsonl lines
+// (assistant lines with content-block arrays + usage; user lines with tool_result).
+
+function asstLine(ts, content, outputTokens) {
+  return JSON.stringify({
+    parentUuid: 'p', isSidechain: true, agentId: 'aX', type: 'assistant',
+    message: { role: 'assistant', content, usage: { output_tokens: outputTokens } },
+    timestamp: ts,
+  })
+}
+
+function toolResultLine(ts) {
+  return JSON.stringify({
+    parentUuid: 'p', isSidechain: true, agentId: 'aX', type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'potentially huge or secret' }] },
+    timestamp: ts,
+  })
+}
+
+const T1 = '2026-07-04T10:00:00.000Z'
+const T2 = '2026-07-04T10:00:05.000Z'
+const T3 = '2026-07-04T10:00:09.000Z'
+
+function transcriptBody() {
+  return asstLine(T1, [{ type: 'text', text: 'Let me look at the config first.' }], 10) + '\n' +
+    toolResultLine(T2) + '\n' +
+    asstLine(T3, [{ type: 'tool_use', name: 'Bash', input: { command: 'ls -la /tmp' } }], 25) + '\n'
+}
+
+test('parseTranscriptTail: tool/text/result events, token sum, torn trailing line dropped', async () => {
+  const f = await write(path.join(root, 'tail', 'agent-t1.jsonl'),
+    transcriptBody() + '{"type":"assistant","mess')          // torn in-progress write, no newline
+  const res = await parseTranscriptTail(f)
+  assert.deepEqual(res.events.map(e => e.kind), ['text', 'tool-result', 'tool'])
+  assert.ok(res.events[0].snippet.startsWith('Let me look'))
+  assert.deepEqual(res.events[1], { kind: 'tool-result', at: T2 })   // no content passthrough
+  assert.equal(res.outputTokens, 35)
+  assert.equal(res.firstTimestamp, T1)
+  assert.equal(res.lastTimestamp, T3)                        // torn line contributed nothing
+  assert.equal(res.currentAction.kind, 'tool')
+  assert.equal(res.currentAction.tool, 'Bash')
+  assert.match(res.currentAction.summary, /ls -la/)
+
+  const capped = await parseTranscriptTail(f, { maxEvents: 1 })
+  assert.equal(capped.events.length, 1)
+  assert.equal(capped.events[0].kind, 'tool')                // most recent survives the cap
+
+  const missing = await parseTranscriptTail(path.join(root, 'tail', 'nope.jsonl'))
+  assert.deepEqual(missing, { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null })
+})
+
+test('parseTranscriptTail: mid-file window drops the leading partial line and still parses', async () => {
+  const f = await write(path.join(root, 'tail', 'agent-t2.jsonl'), transcriptBody())
+  const size = (await fs.stat(f)).size
+  const res = await parseTranscriptTail(f, { maxBytes: size - 10 })  // window starts 10 bytes into line 1
+  assert.deepEqual(res.events.map(e => e.kind), ['tool-result', 'tool'])
+  assert.equal(res.firstTimestamp, T2)                       // earliest seen in window, not true file start
+  assert.equal(res.outputTokens, 25)                         // line 1 usage outside the window
+  assert.equal(res.currentAction.tool, 'Bash')
+})
+
+test('parsePhases: realistic meta block; garbage and phase-less meta yield []', () => {
+  const script = "export const meta = {\n" +
+    "  name: 'live-wf',\n  description: \"a wf, with commas: [and] {brackets}\",\n" +
+    "  phases: [\n    { title: 'Build', detail: 'compile the thing' },\n    { title: \"Verify\" },\n  ],\n}\n" +
+    "export default async function (ctx) { return { phases: ['not these'] } }"
+  assert.deepEqual(parsePhases(script), [{ title: 'Build', detail: 'compile the thing' }, { title: 'Verify' }])
+  assert.deepEqual(parsePhases('utter {{{ garbage'), [])
+  assert.deepEqual(parsePhases("export const meta = { name: 'x' }"), [])
+  assert.deepEqual(parsePhases(null), [])
+})
+
+test('getLiveAgents: journal state + hook startedAt + transcript tail merge', async () => {
+  const tNow = Date.now()
+  const isoAgo = ms => new Date(tNow - ms).toISOString()
+  const pdir = path.join(root, 'projects-live')              // own tree: leaves listRuns fixtures untouched
+  const sess = path.join(pdir, encodeCwd(cwdA), 'session-9')
+  const runDir = path.join(sess, 'subagents', 'workflows', 'wf_liveX')
+
+  await write(path.join(sess, 'workflows', 'wf_liveX.json'), JSON.stringify(record({
+    runId: 'wf_liveX', status: 'running',
+    script: "export const meta = { name: 'live-wf', phases: [{ title: 'Plan' }, { title: 'Build', detail: 'do it' }] }\nreturn 1",
+  })))
+  await write(path.join(runDir, 'journal.jsonl'),
+    '{"type":"started","key":"v2:k1","agentId":"agentD"}\n' +
+    '{"type":"result","key":"v2:k1","agentId":"agentD","result":"done"}\n' +
+    '{"type":"started","key":"v2:k2","agentId":"agentR"}\n')
+  await write(path.join(runDir, 'agent-agentD.jsonl'),
+    asstLine(isoAgo(120000), [{ type: 'text', text: 'done summary' }], 40) + '\n')
+  await write(path.join(runDir, 'agent-agentR.jsonl'),
+    asstLine(isoAgo(45000), [{ type: 'text', text: 'working on it' }], 12) + '\n' +
+    asstLine(isoAgo(2000), [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }], 30) + '\n')
+  const oldD = new Date(tNow - 120000)
+  await fs.utimes(path.join(runDir, 'agent-agentD.jsonl'), oldD, oldD)
+
+  const dataDir = path.join(root, 'hookdata')
+  await write(path.join(dataDir, 'events.jsonl'),
+    JSON.stringify({ hook_event_name: 'SubagentStart', agent_id: 'agentR', agent_type: 'workflow-subagent', conductor_logged_at: isoAgo(50000) }) + '\n' +
+    JSON.stringify({ hook_event_name: 'SubagentStart', agent_id: 'agentZ', agent_type: 'workflow-subagent', conductor_logged_at: isoAgo(50000) }) + '\n' +  // unrelated run
+    JSON.stringify({ hook_event_name: 'SubagentStop', agent_id: 'agentR', conductor_logged_at: isoAgo(1000), agent_transcript_path: path.join(runDir, 'agent-agentR.jsonl') }) + '\n')
+
+  const res = await getLiveAgents('wf_liveX', { projectsDir: pdir, dataDir, now: tNow })
+  assert.equal(res.found, true)
+  assert.equal(res.script, undefined)                        // phases only, never source
+  assert.deepEqual(res.phases, [{ title: 'Plan' }, { title: 'Build', detail: 'do it' }])
+  assert.equal(res.agents.length, 2)                         // agentZ's uncorrelated Start excluded
+
+  const d = res.agents.find(a => a.agentId === 'agentD')
+  const r = res.agents.find(a => a.agentId === 'agentR')
+  assert.equal(d.state, 'done')
+  assert.equal(r.state, 'running')
+  assert.equal(r.startedAt, isoAgo(50000))                   // hook Start beats transcript first line
+  assert.equal(r.elapsedMs, 50000)
+  assert.ok(r.quietMs !== null && r.quietMs < 10000)         // transcript just written
+  assert.equal(r.isFresh, true)
+  assert.equal(r.currentAction.kind, 'tool')
+  assert.equal(r.currentAction.tool, 'Bash')
+  assert.match(r.currentAction.summary, /npm test/)
+  assert.equal(r.outputTokens, 42)
+  assert.ok(r.transcriptPath.endsWith('agent-agentR.jsonl'))
+
+  assert.equal(d.startedAt, isoAgo(120000))                  // fallback: transcript first timestamp
+  assert.equal(d.quietMs, null)                              // quiet is a running-agent concept
+  assert.equal(d.isFresh, false)                             // mtime 2 min old
+  assert.equal(d.outputTokens, 40)
+
+  const missing = await getLiveAgents('wf_nope', { projectsDir: pdir, dataDir, now: tNow })
+  assert.equal(missing.found, false)
+  assert.deepEqual(missing.agents, [])
+  assert.deepEqual(missing.phases, [])
 })
 
 test('saveAsWorkflow: user scope writes to ~/.claude/workflows; invalid names rejected', async () => {
