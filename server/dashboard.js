@@ -272,6 +272,17 @@ function actionText(a){
   if(a.kind==='tool')return a.tool+' '+(a.summary??'')
   return (a.snippet??'').slice(0,120)
 }
+// Agent badge label + dot class, shared by full render and in-place tick.
+function agentBadge(a,drift){
+  const running=a.state==='running'
+  const unknown=a.state!=='running'&&a.state!=='done'
+  const quiet=a.quietMs==null?null:a.quietMs+drift
+  const stalled=running&&quiet!=null&&quiet>120000
+  const fresh=running&&quiet!=null&&quiet<10000
+  const elapsed=a.elapsedMs==null?null:a.elapsedMs+(running?drift:0)
+  const label=unknown?'state unknown':(running?(stalled?'quiet '+ago(quiet)+' — stalled?':'running · '+ago(elapsed)):'done'+(a.elapsedMs?' · '+ago(a.elapsedMs):''))
+  return {dot:stalled?'pdot stall':(fresh?'pdot on':'pdot'),label:label+(a.outputTokens?' · '+fmt(a.outputTokens)+' tok':'')}
+}
 function renderLive(){
   const el=document.getElementById('live-wrap')
   if(!live||!Array.isArray(live.active)){el.innerHTML='';return}
@@ -280,17 +291,9 @@ function renderLive(){
   for(const r of live.active){
     const phases=(r.phases||[]).map(p=>esc(p.title)).join(' → ')
     const cards=(r.agents||[]).map(a=>{
-      const running=a.state==='running'
-      const unknown=a.state!=='running'&&a.state!=='done'
-      const quiet=a.quietMs==null?null:a.quietMs+drift
-      const stalled=running&&quiet!=null&&quiet>120000
-      const fresh=running&&quiet!=null&&quiet<10000
-      const dot=stalled?'pdot stall':(fresh?'pdot on':'pdot')
-      const elapsed=a.elapsedMs==null?null:a.elapsedMs+(running?drift:0)
-      const label=unknown?'state unknown':(running?(stalled?'quiet '+ago(quiet)+' — stalled?':'running · '+ago(elapsed)):'done'+(a.elapsedMs?' · '+ago(a.elapsedMs):''))
+      const b=agentBadge(a,drift)
       return '<div class="acard" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'">'+
-        '<span class="'+dot+'"></span><b>'+esc(a.agentId.slice(0,10))+'</b> <span class="badge">'+label+
-        (a.outputTokens?' · '+fmt(a.outputTokens)+' tok':'')+'</span>'+
+        '<span class="'+b.dot+'"></span><b>'+esc(a.agentId.slice(0,10))+'</b> <span class="badge ab">'+esc(b.label)+'</span>'+
         '<div class="act">'+esc(actionText(a.currentAction))+'</div></div>'
     }).join('')
     html+='<div class="arun"><h3><span class="s live">'+esc(r.source)+'</span> '+esc(r.name??r.runId)+' <span class="badge">'+esc(r.runId)+'</span></h3>'+
@@ -300,10 +303,28 @@ function renderLive(){
   for(const u of (live.unattributed||[])){
     html+='<div class="arun"><h3><span class="s live">running (hook)</span> '+esc(u.name??u.taskId)+' <span class="badge">run id not yet known</span></h3></div>'
   }
-  const fins=(live.justFinished||[]).map(f=>'<span class="fin s '+(f.status==='completed'?'completed':'killed')+'" data-run="'+esc(f.runId)+'">✓ '+esc(f.workflowName??f.runId)+' · '+esc(f.status)+' '+ago(f.finishedAgoMs+drift)+' ago · '+fmt(f.agentCount)+' agents · '+fmt(f.totalTokens)+' tok</span>').join('')
+  const fins=(live.justFinished||[]).map(f=>'<span class="fin s '+(f.status==='completed'?'completed':'killed')+'" data-run="'+esc(f.runId)+'">✓ '+esc(f.workflowName??f.runId)+' · '+esc(f.status)+' <span class="fago" data-base="'+(f.finishedAgoMs??0)+'">'+ago(f.finishedAgoMs+drift)+'</span> ago · '+fmt(f.agentCount)+' agents · '+fmt(f.totalTokens)+' tok</span>').join('')
   el.innerHTML=(html?'<b class="badge">ACTIVE RUNS (live-state is heuristic until the CLI writes the terminal record)</b>'+html:'')+
     (fins?'<div>'+fins+'</div>':'')+
     (!html&&!fins?'<span class="badge">Nothing currently in flight</span>':'')
+}
+// 1s ticker: update timer text/dots IN PLACE. Never innerHTML — a DOM swap
+// mid-click eats the click (this was the "clicking does nothing" bug), and
+// swaps also restart the pulse animation every second.
+function tickLive(){
+  if(!live||!Array.isArray(live.active))return
+  const drift=Date.now()-liveAt
+  const byKey=new Map()
+  for(const r of live.active)for(const a of (r.agents||[]))byKey.set(r.runId+'/'+a.agentId,a)
+  for(const card of document.querySelectorAll('#live-wrap .acard')){
+    const a=byKey.get(card.dataset.run+'/'+card.dataset.agent)
+    if(!a)continue
+    const b=agentBadge(a,drift)
+    const badge=card.querySelector('.ab'),dot=card.querySelector('[class^="pdot"],.pdot')
+    if(badge&&badge.textContent!==b.label)badge.textContent=b.label
+    if(dot&&dot.className!==b.dot)dot.className=b.dot
+  }
+  for(const s of document.querySelectorAll('#live-wrap .fago'))s.textContent=ago(Number(s.dataset.base)+drift)
 }
 // in-flight dedupe + min interval: SSE storms during active runs must not
 // stack overlapping polls of an expensive endpoint
@@ -342,7 +363,13 @@ async function refresh(){
   if(sel)loadDetail(sel)
 }
 function pick(id){selTail=null;sel=id;render();document.getElementById('detail').classList.add('open');loadDetail(id)}
-function pickTail(runId,agentId){sel=null;selTail={runId,agentId};render();loadTail(runId,agentId)}
+function pickTail(runId,agentId){
+  sel=null;selTail={runId,agentId};render()
+  // instant feedback: open with a placeholder before the fetch resolves
+  document.getElementById('dbody').innerHTML='<span class="badge">loading agent feed…</span>'
+  document.getElementById('detail').classList.add('open')
+  loadTail(runId,agentId)
+}
 function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
 async function loadDetail(id){
   const [run,ag]=await Promise.all([q('/api/run/'+encodeURIComponent(id)),q('/api/agents/'+encodeURIComponent(id))])
@@ -368,7 +395,9 @@ document.getElementById('filter').addEventListener('input',e=>{filter=e.target.v
 document.getElementById('grp').addEventListener('change',e=>{groupOn=e.target.checked;render()})
 document.getElementById('close').addEventListener('click',closeDrawer)
 addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()})
-document.getElementById('live-wrap').addEventListener('click',e=>{
+// pointerdown, not click: it fires before any DOM update can replace the
+// target, so interactions can't be lost to a re-render.
+document.getElementById('live-wrap').addEventListener('pointerdown',e=>{
   const card=e.target.closest('.acard')
   if(card)return pickTail(card.dataset.run,card.dataset.agent)
   const fin=e.target.closest('.fin')
@@ -379,9 +408,9 @@ es.onopen=()=>document.getElementById('dot').classList.add('live')
 es.onerror=()=>document.getElementById('dot').classList.remove('live')
 es.addEventListener('change',()=>{refresh();refreshLive()})
 es.addEventListener('tick',()=>{refresh();refreshLive(true)})
-// fast poll while anything is active or in the grace window; 1s local ticker keeps timers moving
+// fast poll while anything is active or in the grace window; 1s in-place tick keeps timers moving
 setInterval(()=>{if(live&&Array.isArray(live.active)&&(live.active.length+(live.justFinished||[]).length+(live.unattributed||[]).length))refreshLive()},5000)
-setInterval(()=>{if(live&&Array.isArray(live.active)&&(live.active.length||(live.justFinished||[]).length))renderLive()},1000)
+setInterval(tickLive,1000)
 refresh();refreshLive(true)
 </script></body></html>`
 
