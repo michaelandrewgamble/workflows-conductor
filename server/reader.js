@@ -361,7 +361,7 @@ const FRESH_WINDOW_MS = 10 * 1000
 // Reads at most the last maxBytes; drops the leading partial line when the
 // window starts mid-file and any torn (in-progress) trailing line.
 export async function parseTranscriptTail(filePath, { maxBytes = 65536, maxEvents = 30 } = {}) {
-  const out = { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null }
+  const out = { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null, model: null }
   let text = null
   let startedMidFile = false
   let fh = null
@@ -402,6 +402,7 @@ export async function parseTranscriptTail(filePath, { maxBytes = 65536, maxEvent
     if (line.type === 'assistant' && Array.isArray(line.message?.content)) {
       const ot = line.message?.usage?.output_tokens
       if (typeof ot === 'number') tokens = (tokens ?? 0) + ot
+      if (typeof line.message?.model === 'string') out.model = line.message.model   // last seen wins
       for (const block of line.message.content) {
         if (!block || typeof block !== 'object') continue
         if (block.type === 'tool_use') {
@@ -540,6 +541,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
     const tail = await parseTranscriptTail(a.transcriptPath)
     a.currentAction = tail.currentAction
     a.outputTokens = tail.outputTokens
+    a.model = tail.model
     if (!a.startedAt && tail.firstTimestamp) a.startedAt = tail.firstTimestamp  // window start ≈ start; hook data is preferred
   }
 
@@ -562,6 +564,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
       isFresh: Number.isFinite(lastMs) && now - lastMs < FRESH_WINDOW_MS,
       currentAction: a.currentAction,
       outputTokens: a.outputTokens,
+      model: a.model ?? null,
       transcriptPath: a.transcriptPath,
     }
   })

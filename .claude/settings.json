@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cursor --help)",
+      "Read(//Users/michaelgamble/Library/Application Support/Cursor/User/**)",
+      "Bash(awk 'NR>=255 && NR<=285' server/reader.test.js)"
+    ],
+    "additionalDirectories": [
+      "/Users/michaelgamble/Library/Application Support/Cursor/User"
+    ]
+  }
+}

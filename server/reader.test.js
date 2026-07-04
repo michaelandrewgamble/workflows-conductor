@@ -271,7 +271,7 @@ test('parseTranscriptTail: tool/text/result events, token sum, torn trailing lin
   assert.equal(capped.events[0].kind, 'tool')                // most recent survives the cap
 
   const missing = await parseTranscriptTail(path.join(root, 'tail', 'nope.jsonl'))
-  assert.deepEqual(missing, { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null })
+  assert.deepEqual(missing, { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null, model: null })
 })
 
 test('parseTranscriptTail: mid-file window drops the leading partial line and still parses', async () => {

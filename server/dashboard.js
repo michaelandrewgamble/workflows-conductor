@@ -239,7 +239,8 @@ const shortProj=p=>{const s=String(p||'').split('-').filter(Boolean);return s.le
 // so sort/filter/grouping/collapsed/selection all survive SSE-triggered refreshes.
 let sel=null,sortKey='timestamp',sortDir=-1,filter='',statusFilter='all',groupOn=true,data=null
 const collapsed=new Set()
-const COLS=[['runId','run'],['workflowName','name'],['status','status'],['agentCount','agents'],['totalTokens','tokens'],['durationMs','dur'],['timestamp','when'],['projectDir','project']]
+const COLS=[['runId','run'],['workflowName','name'],['status','status'],['agentCount','agents'],['totalTokens','tokens'],['durationMs','dur'],['defaultModel','model'],['timestamp','when'],['projectDir','project']]
+const shortModel=m=>m?String(m).replace(/^claude-/,''):''
 const NUM=new Set(['agentCount','totalTokens','durationMs'])
 function cmp(a,b){
   let x=a[sortKey],y=b[sortKey]
@@ -261,6 +262,7 @@ function liveRows(){
       agentCount:agents.length||null,
       totalTokens:agents.reduce((s,a)=>s+(a.outputTokens||0),0)||null,
       durationMs:Math.max(0,...agents.map(a=>a.elapsedMs||0))||null,
+      defaultModel:agents.map(a=>a.model).find(Boolean)??null,
       timestamp:r.lastActivity??new Date(liveAt).toISOString(),
       projectDir:r.projectDir??null,isLive:true,agents,
     })
@@ -276,7 +278,7 @@ function rowHtml(r){
   const cls=r.isLive?(r.status.startsWith('stale')?'stale':'live'):(r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk'))
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
   const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
-  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':'')+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':'')+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
   // Agent sub-rows use the SAME columns as runs: id · label · status ·
   // (agents) · tokens · dur · when · (project). Current-action detail lives
   // in the click-through drawer, not the table.
@@ -289,6 +291,7 @@ function rowHtml(r){
       '<td></td>'+
       '<td>'+(a.outputTokens!=null?fmt(a.outputTokens):'')+'</td>'+
       '<td class="adur" data-base="'+(a.elapsedMs??'')+'" data-run-state="'+(b.running?'1':'')+'">'+(b.elapsed!=null?ago(b.elapsed):'')+'</td>'+
+      '<td class="badge">'+esc(shortModel(a.model))+'</td>'+
       '<td>'+(a.lastActivityAt?when(a.lastActivityAt):'')+'</td>'+
       '<td></td></tr>'
   }
@@ -313,12 +316,12 @@ function render(){
     for(const r of runs){const k=r.projectDir??'';(groups.get(k)??groups.set(k,[]).get(k)).push(r)}
     for(const [k,rs] of groups){
       const open=!collapsed.has(k)||rs.some(r=>r.isLive)   // never hide a live run behind a collapsed group
-      html+='<tr class="grp" data-gk="'+esc(k)+'"><td colspan=8>'+(open?'▾ ':'▸ ')+esc(shortProj(k))+' <span class="badge">('+rs.length+' run'+(rs.length===1?'':'s')+')</span></td></tr>'
+      html+='<tr class="grp" data-gk="'+esc(k)+'"><td colspan=9>'+(open?'▾ ':'▸ ')+esc(shortProj(k))+' <span class="badge">('+rs.length+' run'+(rs.length===1?'':'s')+')</span></td></tr>'
       if(open)html+=rs.map(rowHtml).join('')
     }
   }else html=runs.map(rowHtml).join('')
   const emptyMsg=statusFilter==='active'?'No active runs right now':(((data&&data.runs)||[]).length?'No runs match the filter':'No workflow runs found — launch one with an ultracode: prompt (CLI ≥ 2.1.154)')
-  document.getElementById('rows').innerHTML=html||'<tr><td colspan=8 class="badge">'+emptyMsg+'</td></tr>'
+  document.getElementById('rows').innerHTML=html||'<tr><td colspan=9 class="badge">'+emptyMsg+'</td></tr>'
 }
 // ── Active Runs (F2/F4): fed by /api/live, elapsed ticks locally between polls ──
 let live=null,liveAt=0,selTail=null

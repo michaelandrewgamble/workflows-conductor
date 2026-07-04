@@ -3,7 +3,7 @@
   "name": "conductor",
   "displayName": "Workflows Conductor",
   "description": "Manage Claude Code dynamic workflow runs from the VS Code/Cursor extension: list, inspect, save, and re-run — the /workflows and Desktop tasks-pane experience for surfaces that lack it.",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "author": {
     "name": "Michael Gamble",
     "email": "michaelandrewgamble@gmail.com"
