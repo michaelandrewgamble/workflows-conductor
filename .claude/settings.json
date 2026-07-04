@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cursor --help)",
       "Read(//Users/michaelgamble/Library/Application Support/Cursor/User/**)",
-      "Bash(awk 'NR>=255 && NR<=285' server/reader.test.js)"
+      "Bash(awk 'NR>=255 && NR<=285' server/reader.test.js)",
+      "Bash(osascript -e 'tell application \"Cursor\" to activate' -e 'delay 0.3' -e 'tell application \"System Events\" to key code 2 using {control down, option down}')"
     ],
     "additionalDirectories": [
       "/Users/michaelgamble/Library/Application Support/Cursor/User"
