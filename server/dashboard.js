@@ -276,9 +276,20 @@ function rowHtml(r){
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
   const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
   let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':'')+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  // Agent sub-rows use the SAME columns as runs: id · label · status ·
+  // (agents) · tokens · dur · when · (project). Current-action detail lives
+  // in the click-through drawer, not the table.
   if(r.isLive)for(const a of r.agents){
     const b=agentBadge(a,drift)
-    html+='<tr class="sub" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'"><td colspan="3"><span class="'+b.dot+'"></span><b>'+esc(a.agentId.slice(0,10))+'</b> <span class="badge ab">'+esc(b.label)+'</span></td><td colspan="5" class="act">'+esc(actionText(a.currentAction))+'</td></tr>'
+    html+='<tr class="sub" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'">'+
+      '<td><span class="'+b.dot+'"></span>'+esc(a.agentId.slice(0,10))+'</td>'+
+      '<td class="badge">'+esc(a.label??'—')+'</td>'+
+      '<td><span class="s '+b.statusCls+' ast">'+esc(b.statusText)+'</span></td>'+
+      '<td>—</td>'+
+      '<td>'+fmt(a.outputTokens)+'</td>'+
+      '<td class="adur" data-base="'+(a.elapsedMs??'')+'" data-run-state="'+(b.running?'1':'')+'">'+(b.elapsed!=null?ago(b.elapsed):'—')+'</td>'+
+      '<td>'+when(a.lastActivityAt)+'</td>'+
+      '<td class="badge">—</td></tr>'
   }
   return html
 }
@@ -316,7 +327,7 @@ function actionText(a){
   if(a.kind==='tool')return a.tool+' '+(a.summary??'')
   return (a.snippet??'').slice(0,120)
 }
-// Agent badge label + dot class, shared by full render and in-place tick.
+// Agent presentation parts, shared by full render and in-place tick.
 function agentBadge(a,drift){
   const running=a.state==='running'
   const unknown=a.state!=='running'&&a.state!=='done'
@@ -324,8 +335,12 @@ function agentBadge(a,drift){
   const stalled=running&&quiet!=null&&quiet>120000
   const fresh=running&&quiet!=null&&quiet<10000
   const elapsed=a.elapsedMs==null?null:a.elapsedMs+(running?drift:0)
-  const label=unknown?'state unknown':(running?(stalled?'quiet '+ago(quiet)+' — stalled?':'running · '+ago(elapsed)):'done'+(a.elapsedMs?' · '+ago(a.elapsedMs):''))
-  return {dot:stalled?'pdot stall':(fresh?'pdot on':'pdot'),label:label+(a.outputTokens?' · '+fmt(a.outputTokens)+' tok':'')}
+  return {
+    dot:stalled?'pdot stall':(fresh?'pdot on':'pdot'),
+    statusText:unknown?'unknown':(running?(stalled?'quiet '+ago(quiet)+' — stalled?':'running'):'done'),
+    statusCls:unknown?'unk':(running?(stalled?'stale':'live'):'completed'),
+    elapsed,running,
+  }
 }
 // 1s ticker: update timer text/dots IN PLACE. Never innerHTML — a DOM swap
 // mid-click eats the click, and swaps restart the pulse animation.
@@ -338,9 +353,10 @@ function tickLive(){
     const a=byKey.get(row.dataset.run+'/'+row.dataset.agent)
     if(!a)continue
     const b=agentBadge(a,drift)
-    const badge=row.querySelector('.ab'),dot=row.querySelector('[class^="pdot"],.pdot')
-    if(badge&&badge.textContent!==b.label)badge.textContent=b.label
+    const st=row.querySelector('.ast'),dot=row.querySelector('[class^="pdot"],.pdot'),ad=row.querySelector('.adur')
+    if(st&&st.textContent!==b.statusText){st.textContent=b.statusText;st.className='s '+b.statusCls+' ast'}
     if(dot&&dot.className!==b.dot)dot.className=b.dot
+    if(ad&&b.running&&b.elapsed!=null)ad.textContent=ago(b.elapsed)
   }
   for(const td of document.querySelectorAll('#rows td.ldur'))td.textContent=ago(Number(td.dataset.base)+drift)
 }
