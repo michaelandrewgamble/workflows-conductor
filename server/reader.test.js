@@ -126,6 +126,20 @@ test('project membership: encoded-cwd records AND cross-project scriptPath both 
   assert.ok(!ids.includes('wf_degraded') || true)          // degraded has no scriptPath; membership via its own project dir
 })
 
+test('resumed run: terminal record + newer dir activity → live candidate with resumedAfter', async () => {
+  const sessA = path.join(projectsDir, encodeCwd(cwdA), 'session-1')
+  await write(path.join(sessA, 'workflows', 'wf_resumed.json'),
+    JSON.stringify(record({ runId: 'wf_resumed', status: 'killed', timestamp: new Date(now - 600000).toISOString() })))
+  const dir = path.join(sessA, 'subagents', 'workflows', 'wf_resumed')
+  await write(path.join(dir, 'journal.jsonl'), '{"type":"started","key":"v2:r1","agentId":"agentR"}\n')
+  // journal mtime is "just written" — newer than the 10-min-old record
+  const res = await listRuns({ projectsDir, cwd: cwdA, scope: 'all', limit: 50, now: Date.now() })
+  const c = res.liveCandidates.find(x => x.runId === 'wf_resumed')
+  assert.ok(c, 'resumed run surfaces as live candidate despite terminal record')
+  assert.equal(c.resumedAfter, 'killed')
+  assert.equal(c.derivedStatus, 'live?')
+})
+
 test('live candidates: recent → live?, silent → stale; scoped by project', async () => {
   const all = await listRuns({ projectsDir, cwd: cwdA, scope: 'all', limit: 50, now })
   const live = all.liveCandidates.find(c => c.runId === 'wf_live')

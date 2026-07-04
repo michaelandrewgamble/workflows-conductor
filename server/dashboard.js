@@ -79,7 +79,9 @@ async function liveState() {
     active.push({
       runId, source,
       name: hook?.name ?? null,
+      projectDir: cand?.projectDir ?? null,
       lastActivity: cand?.lastActivity ?? null,
+      resumedAfter: cand?.resumedAfter ?? null,
       phases: detail.phases ?? [],
       agents: detail.agents ?? [],
     })
@@ -206,24 +208,21 @@ tr.grp td{cursor:pointer;user-select:none;background:var(--card);color:var(--mut
 .agent{padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--card)}
 .agent b{font-size:12px}.agent .mut{display:block;font-size:11px;word-break:break-all}
 pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:280px;overflow:auto}
-#live-wrap{padding:10px 20px;border-bottom:1px solid var(--line)}
-.arun{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:10px 12px;margin:8px 0}
-.arun h3{margin:0 0 2px;font-size:13px}.arun .ph{font-size:11px;color:var(--mut);margin-bottom:6px}
-.agrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
-.acard{border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px 10px;cursor:pointer}
-.acard:hover{border-color:var(--acc)}
-.acard b{font-size:12px}.acard .act{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 .pdot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--mut)}
 .pdot.on{background:var(--ok);animation:pulse 1.2s ease-in-out infinite}
 .pdot.stall{background:var(--warn)}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
-.fin{display:inline-block;margin:2px 8px 2px 0;cursor:pointer}
+tr.sub td{padding:4px 10px 4px 26px;border-bottom:1px dashed var(--line);background:color-mix(in srgb,var(--card) 60%,var(--bg));font-size:12px;cursor:pointer;max-width:none}
+tr.sub:hover td{background:var(--card)}
+tr.sub .act{color:var(--mut);font-size:11px}
 .tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px}
 .tev .tool{color:var(--acc)}.tev .badge{display:block}
 .badge{font-size:11px;color:var(--mut)}
+#sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+#sf button{background:var(--bg);color:var(--mut);border:0;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
+#sf button.on{background:var(--card);color:var(--fg)}
 </style></head><body>
-<header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><span id="dot" title="SSE"></span></header>
-<div id="live-wrap"></div>
+<header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><span id="sf"><button data-f="all" class="on">all</button><button data-f="active">active</button><button data-f="done">finished</button></span><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><span id="dot" title="SSE"></span></header>
 <main><section><table><thead><tr id="hdr"></tr></thead><tbody id="rows"></tbody></table></section></main>
 <aside id="detail"><button id="close" title="close (Esc)">✕</button><div id="dbody"></div></aside>
 <script>
@@ -236,7 +235,7 @@ const when=ts=>ts?new Date(ts).toLocaleString():'—'
 const shortProj=p=>{const s=String(p||'').split('-').filter(Boolean);return s.length?s.slice(-2).join('-'):'(no project)'}
 // UI state lives here at module level; refresh() only swaps data and re-renders,
 // so sort/filter/grouping/collapsed/selection all survive SSE-triggered refreshes.
-let sel=null,sortKey='timestamp',sortDir=-1,filter='',groupOn=true,data=null
+let sel=null,sortKey='timestamp',sortDir=-1,filter='',statusFilter='all',groupOn=true,data=null
 const collapsed=new Set()
 const COLS=[['runId','run'],['workflowName','name'],['status','status'],['agentCount','agents'],['totalTokens','tokens'],['durationMs','dur'],['timestamp','when'],['projectDir','project']]
 const NUM=new Set(['agentCount','totalTokens','durationMs'])
@@ -247,29 +246,66 @@ function cmp(a,b){
   x=String(x??'').toLowerCase();y=String(y??'').toLowerCase()
   return (x<y?-1:x>y?1:0)*sortDir
 }
+// Live runs become ordinary table rows (status running/live?/stale); their
+// per-agent detail renders as indented sub-rows directly beneath.
+function liveRows(){
+  if(!live||!Array.isArray(live.active))return []
+  const rows=[]
+  for(const r of live.active){
+    const agents=r.agents||[]
+    const status=(r.source==='stale'?'stale (interrupted?)':'running')+(r.resumedAfter?' (resumed after '+r.resumedAfter+')':'')
+    rows.push({
+      runId:r.runId,workflowName:r.name??null,status,statusRecognized:true,compat:'ok',
+      agentCount:agents.length||null,
+      totalTokens:agents.reduce((s,a)=>s+(a.outputTokens||0),0)||null,
+      durationMs:Math.max(0,...agents.map(a=>a.elapsedMs||0))||null,
+      timestamp:r.lastActivity??new Date(liveAt).toISOString(),
+      projectDir:r.projectDir??null,isLive:true,agents,
+    })
+  }
+  for(const u of (live.unattributed||[])){
+    rows.push({runId:u.taskId,workflowName:u.name??null,status:'running (id pending)',statusRecognized:true,compat:'ok',
+      agentCount:null,totalTokens:null,durationMs:null,timestamp:u.seenAt??new Date(liveAt).toISOString(),projectDir:null,isLive:true,agents:[],noPick:true})
+  }
+  return rows
+}
 function rowHtml(r){
-  const cls=r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk')
+  const drift=Date.now()-liveAt
+  const cls=r.isLive?(r.status.startsWith('stale')?'stale':'live'):(r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk'))
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
-  return '<tr class="run'+(sel===r.runId?' sel':'')+'" data-id="'+esc(r.runId)+'"><td>'+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td><td>'+dur(r.durationMs)+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
+  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':'')+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  if(r.isLive)for(const a of r.agents){
+    const b=agentBadge(a,drift)
+    html+='<tr class="sub" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'"><td colspan="3"><span class="'+b.dot+'"></span><b>'+esc(a.agentId.slice(0,10))+'</b> <span class="badge ab">'+esc(b.label)+'</span></td><td colspan="5" class="act">'+esc(actionText(a.currentAction))+'</td></tr>'
+  }
+  return html
 }
 function render(){
-  if(!data)return
+  if(!data&&!live)return
   document.getElementById('hdr').innerHTML=COLS.map(c=>'<th data-k="'+c[0]+'">'+c[1]+(sortKey===c[0]?(sortDir>0?' ▲':' ▼'):'')+'</th>').join('')
-  const nErr=(data.errors||[]).length
-  document.getElementById('totals').textContent=data.totalRuns+' runs · '+data.projectCount+' projects'+(nErr?' · '+nErr+' unreadable':'')
+  const nErr=((data&&data.errors)||[]).length
+  if(data)document.getElementById('totals').textContent=data.totalRuns+' runs · '+data.projectCount+' projects'+(nErr?' · '+nErr+' unreadable':'')
+  const lv=liveRows()
+  const liveIds=new Set(lv.map(r=>r.runId))
+  const recorded=((data&&data.runs)||[]).filter(r=>!liveIds.has(r.runId))  // race guard: never both
   const f=filter.trim().toLowerCase()
-  const runs=data.runs.filter(r=>!f||[r.runId,r.workflowName,r.status,r.projectDir].some(v=>String(v??'').toLowerCase().includes(f))).sort(cmp)
+  const runs=[...lv,...recorded]
+    .filter(r=>statusFilter==='all'||(statusFilter==='active')===(!!r.isLive))
+    .filter(r=>!f||[r.runId,r.workflowName,r.status,r.projectDir].some(v=>String(v??'').toLowerCase().includes(f)))
+    .sort(cmp)
   let html=''
   if(groupOn){
     const groups=new Map()
     for(const r of runs){const k=r.projectDir??'';(groups.get(k)??groups.set(k,[]).get(k)).push(r)}
     for(const [k,rs] of groups){
-      const open=!collapsed.has(k)
+      const open=!collapsed.has(k)||rs.some(r=>r.isLive)   // never hide a live run behind a collapsed group
       html+='<tr class="grp" data-gk="'+esc(k)+'"><td colspan=8>'+(open?'▾ ':'▸ ')+esc(shortProj(k))+' <span class="badge">('+rs.length+' run'+(rs.length===1?'':'s')+')</span></td></tr>'
       if(open)html+=rs.map(rowHtml).join('')
     }
   }else html=runs.map(rowHtml).join('')
-  document.getElementById('rows').innerHTML=html||'<tr><td colspan=8 class="badge">'+(data.runs.length?'No runs match the filter':'No workflow runs found — launch one with an ultracode: prompt (CLI ≥ 2.1.154)')+'</td></tr>'
+  const emptyMsg=statusFilter==='active'?'No active runs right now':(((data&&data.runs)||[]).length?'No runs match the filter':'No workflow runs found — launch one with an ultracode: prompt (CLI ≥ 2.1.154)')
+  document.getElementById('rows').innerHTML=html||'<tr><td colspan=8 class="badge">'+emptyMsg+'</td></tr>'
 }
 // ── Active Runs (F2/F4): fed by /api/live, elapsed ticks locally between polls ──
 let live=null,liveAt=0,selTail=null
@@ -290,48 +326,22 @@ function agentBadge(a,drift){
   const label=unknown?'state unknown':(running?(stalled?'quiet '+ago(quiet)+' — stalled?':'running · '+ago(elapsed)):'done'+(a.elapsedMs?' · '+ago(a.elapsedMs):''))
   return {dot:stalled?'pdot stall':(fresh?'pdot on':'pdot'),label:label+(a.outputTokens?' · '+fmt(a.outputTokens)+' tok':'')}
 }
-function renderLive(){
-  const el=document.getElementById('live-wrap')
-  if(!live||!Array.isArray(live.active)){el.innerHTML='';return}
-  const drift=Date.now()-liveAt
-  let html=''
-  for(const r of live.active){
-    const phases=(r.phases||[]).map(p=>esc(p.title)).join(' → ')
-    const cards=(r.agents||[]).map(a=>{
-      const b=agentBadge(a,drift)
-      return '<div class="acard" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'">'+
-        '<span class="'+b.dot+'"></span><b>'+esc(a.agentId.slice(0,10))+'</b> <span class="badge ab">'+esc(b.label)+'</span>'+
-        '<div class="act">'+esc(actionText(a.currentAction))+'</div></div>'
-    }).join('')
-    html+='<div class="arun"><h3><span class="s live">'+esc(r.source)+'</span> '+esc(r.name??r.runId)+' <span class="badge">'+esc(r.runId)+'</span></h3>'+
-      (phases?'<div class="ph">plan: '+phases+'</div>':'')+
-      '<div class="agrid">'+(cards||'<span class="badge">no agents seen yet</span>')+'</div></div>'
-  }
-  for(const u of (live.unattributed||[])){
-    html+='<div class="arun"><h3><span class="s live">running (hook)</span> '+esc(u.name??u.taskId)+' <span class="badge">run id not yet known</span></h3></div>'
-  }
-  const fins=(live.justFinished||[]).map(f=>'<span class="fin s '+(f.status==='completed'?'completed':'killed')+'" data-run="'+esc(f.runId)+'">✓ '+esc(f.workflowName??f.runId)+' · '+esc(f.status)+' <span class="fago" data-base="'+(f.finishedAgoMs??0)+'">'+ago(f.finishedAgoMs+drift)+'</span> ago · '+fmt(f.agentCount)+' agents · '+fmt(f.totalTokens)+' tok</span>').join('')
-  el.innerHTML=(html?'<b class="badge">ACTIVE RUNS (live-state is heuristic until the CLI writes the terminal record)</b>'+html:'')+
-    (fins?'<div>'+fins+'</div>':'')+
-    (!html&&!fins?'<span class="badge">Nothing currently in flight</span>':'')
-}
 // 1s ticker: update timer text/dots IN PLACE. Never innerHTML — a DOM swap
-// mid-click eats the click (this was the "clicking does nothing" bug), and
-// swaps also restart the pulse animation every second.
+// mid-click eats the click, and swaps restart the pulse animation.
 function tickLive(){
-  if(!live||!Array.isArray(live.active))return
+  if(!live||!Array.isArray(live.active)||!live.active.length)return
   const drift=Date.now()-liveAt
   const byKey=new Map()
   for(const r of live.active)for(const a of (r.agents||[]))byKey.set(r.runId+'/'+a.agentId,a)
-  for(const card of document.querySelectorAll('#live-wrap .acard')){
-    const a=byKey.get(card.dataset.run+'/'+card.dataset.agent)
+  for(const row of document.querySelectorAll('#rows tr.sub')){
+    const a=byKey.get(row.dataset.run+'/'+row.dataset.agent)
     if(!a)continue
     const b=agentBadge(a,drift)
-    const badge=card.querySelector('.ab'),dot=card.querySelector('[class^="pdot"],.pdot')
+    const badge=row.querySelector('.ab'),dot=row.querySelector('[class^="pdot"],.pdot')
     if(badge&&badge.textContent!==b.label)badge.textContent=b.label
     if(dot&&dot.className!==b.dot)dot.className=b.dot
   }
-  for(const s of document.querySelectorAll('#live-wrap .fago'))s.textContent=ago(Number(s.dataset.base)+drift)
+  for(const td of document.querySelectorAll('#rows td.ldur'))td.textContent=ago(Number(td.dataset.base)+drift)
 }
 // in-flight dedupe + min interval: SSE storms during active runs must not
 // stack overlapping polls of an expensive endpoint
@@ -343,7 +353,7 @@ async function refreshLive(force){
   try{
     const d=await q('/api/live')
     if(d&&Array.isArray(d.active)){live=d;liveAt=Date.now()}
-    renderLive()
+    render()
     if(selTail)loadTail(selTail.runId,selTail.agentId)
   }catch{}finally{liveBusy=false}
 }
@@ -382,14 +392,24 @@ async function loadDetail(id){
   const [run,ag]=await Promise.all([q('/api/run/'+encodeURIComponent(id)),q('/api/agents/'+encodeURIComponent(id))])
   if(sel!==id)return
   const agents=(ag.agents||[]).map(a=>'<div class="agent"><b>'+esc(a.label??a.agentId)+'</b> <span class="badge">'+esc(a.state??(a.finished?'done':a.started?'started':'?'))+(a.tokens?' · '+fmt(a.tokens)+' tok':'')+'</span>'+(a.transcriptPath?'<span class="mut">'+esc(a.transcriptPath)+'</span>':'')+'</div>').join('')
-  document.getElementById('dbody').innerHTML='<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+(run.error?'<br>error: '+esc(run.error):'')+'</div>'+
-    (run.summary?'<p>'+esc(run.summary)+'</p>':'')+(run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'')+
-    '<h2>Agents ('+(ag.agents||[]).length+')</h2>'+agents
+  const head=run.found===false
+    ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet (details below come from the live journal/transcripts)</div>'
+    :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+(run.error?'<br>error: '+esc(run.error):'')+'</div>'+
+      (run.summary?'<p>'+esc(run.summary)+'</p>':'')+(run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'')
+  document.getElementById('dbody').innerHTML=head+'<h2>Agents ('+(ag.agents||[]).length+')</h2>'+agents
 }
-document.getElementById('rows').addEventListener('click',e=>{
+// pointerdown, not click: fires before any re-render can replace the target.
+document.getElementById('rows').addEventListener('pointerdown',e=>{
   const tr=e.target.closest('tr');if(!tr)return
   if(tr.dataset.gk!==undefined){const k=tr.dataset.gk;collapsed.has(k)?collapsed.delete(k):collapsed.add(k);render();return}
-  if(tr.dataset.id)pick(tr.dataset.id)
+  if(tr.classList.contains('sub'))return pickTail(tr.dataset.run,tr.dataset.agent)
+  if(tr.dataset.id&&!tr.dataset.nopick)pick(tr.dataset.id)
+})
+document.getElementById('sf').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return
+  statusFilter=b.dataset.f
+  for(const x of document.querySelectorAll('#sf button'))x.classList.toggle('on',x===b)
+  render()
 })
 document.getElementById('hdr').addEventListener('click',e=>{
   const th=e.target.closest('th');if(!th||!th.dataset.k)return
@@ -402,21 +422,13 @@ document.getElementById('filter').addEventListener('input',e=>{filter=e.target.v
 document.getElementById('grp').addEventListener('change',e=>{groupOn=e.target.checked;render()})
 document.getElementById('close').addEventListener('click',closeDrawer)
 addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()})
-// pointerdown, not click: it fires before any DOM update can replace the
-// target, so interactions can't be lost to a re-render.
-document.getElementById('live-wrap').addEventListener('pointerdown',e=>{
-  const card=e.target.closest('.acard')
-  if(card)return pickTail(card.dataset.run,card.dataset.agent)
-  const fin=e.target.closest('.fin')
-  if(fin)pick(fin.dataset.run)
-})
 const es=new EventSource('/events?t='+T)
 es.onopen=()=>document.getElementById('dot').classList.add('live')
 es.onerror=()=>document.getElementById('dot').classList.remove('live')
 es.addEventListener('change',()=>{refresh();refreshLive()})
 es.addEventListener('tick',()=>{refresh();refreshLive(true)})
-// fast poll while anything is active or in the grace window; 1s in-place tick keeps timers moving
-setInterval(()=>{if(live&&Array.isArray(live.active)&&(live.active.length+(live.justFinished||[]).length+(live.unattributed||[]).length))refreshLive()},5000)
+// fast poll while anything is live; 1s in-place tick keeps timers moving
+setInterval(()=>{if(live&&Array.isArray(live.active)&&(live.active.length+(live.unattributed||[]).length))refreshLive()},5000)
 setInterval(tickLive,1000)
 refresh();refreshLive(true)
 </script></body></html>`

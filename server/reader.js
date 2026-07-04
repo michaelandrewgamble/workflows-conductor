@@ -193,13 +193,30 @@ export async function listRuns({
     rows.push(toRow(parsed.value, file, now))
   }
 
-  // Live/interrupted candidates: run agent dirs with no record anywhere.
-  const recordedIds = new Set(rows.map(r => r.runId))
+  // Live/interrupted candidates: run agent dirs with no record anywhere —
+  // PLUS recorded runs whose dir has activity NEWER than the record. A killed
+  // run resumed in its owning session reuses the same runId/dir, and the old
+  // terminal record lingers until the resume reaches its own terminal state.
+  const recordedRows = new Map(rows.map(r => [r.runId, r]))
   const liveCandidates = []
   for (const dir of await findRunAgentDirs(projectsDir)) {
     const runId = path.basename(dir)
-    if (recordedIds.has(runId)) continue
+    const rec = recordedRows.get(runId)
     const last = await maxMtime(dir)
+    if (rec) {
+      const recordedAt = Date.parse(rec.timestamp ?? 0) || 0
+      if (!last || last <= recordedAt + 5000) continue      // record is current
+      liveCandidates.push({
+        runId,
+        projectDir: projectDirOf(dir),
+        sessionId: sessionIdOf(dir),
+        lastActivity: new Date(last).toISOString(),
+        derivedStatus: now - last < LIVE_WINDOW_MS ? 'live?' : 'stale',
+        resumedAfter: rec.status,                            // e.g. 'killed'
+        agentDir: dir,
+      })
+      continue
+    }
     liveCandidates.push({
       runId,
       projectDir: projectDirOf(dir),
