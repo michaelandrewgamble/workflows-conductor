@@ -546,6 +546,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
   // 4. Phases from the run's script (source never returned).
   const src = await getScript(runId, { projectsDir })
   const phases = src.found ? parsePhases(src.script) : []
+  const workflowName = src.found ? (src.script.match(/name:\s*['"]([^'"]+)['"]/)?.[1] ?? null) : null
 
   const rows = [...agents.values()].map(a => {
     const startedMs = a.startedAt ? Date.parse(a.startedAt) : NaN
@@ -565,7 +566,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
     }
   })
 
-  return { runId, found, phases, agents: rows, script: undefined }
+  return { runId, found, phases, workflowName, agents: rows, script: undefined }
 }
 
 // Mirrors the CLI's `s` (save) semantics: project scope writes to the nearest

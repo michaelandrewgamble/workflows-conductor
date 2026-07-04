@@ -76,9 +76,10 @@ async function liveState() {
     const detail = await getLiveAgents(runId, { dataDir: DATA_DIR, now })
     const cand = all.liveCandidates.find(c => c.runId === runId)
     const hook = hookLive.find(h => h.runId === runId)
+    const rec = all.runs.find(r => r.runId === runId)   // resumed runs have a (stale) record — with the name
     active.push({
       runId, source,
-      name: hook?.name ?? null,
+      name: hook?.name ?? rec?.workflowName ?? detail.workflowName ?? null,
       projectDir: cand?.projectDir ?? null,
       lastActivity: cand?.lastActivity ?? null,
       resumedAfter: cand?.resumedAfter ?? null,
