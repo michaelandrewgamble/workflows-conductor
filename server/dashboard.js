@@ -213,7 +213,8 @@ pre{background:var(--card);border:1px solid var(--line);border-radius:8px;paddin
 .pdot.on{background:var(--ok);animation:pulse 1.2s ease-in-out infinite}
 .pdot.stall{background:var(--warn)}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
-tr.sub td{padding:4px 10px 4px 26px;border-bottom:1px dashed var(--line);background:color-mix(in srgb,var(--card) 60%,var(--bg));font-size:12px;cursor:pointer;max-width:none}
+tr.sub td{padding:4px 10px;border-bottom:1px dashed var(--line);background:color-mix(in srgb,var(--card) 60%,var(--bg));font-size:12px;cursor:pointer;max-width:none}
+tr.sub td:first-child{padding-left:26px}
 tr.sub:hover td{background:var(--card)}
 tr.sub .act{color:var(--mut);font-size:11px}
 .tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px}
@@ -283,13 +284,13 @@ function rowHtml(r){
     const b=agentBadge(a,drift)
     html+='<tr class="sub" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'">'+
       '<td><span class="'+b.dot+'"></span>'+esc(a.agentId.slice(0,10))+'</td>'+
-      '<td class="badge">'+esc(a.label??'—')+'</td>'+
+      '<td class="badge">'+esc(a.label??'')+'</td>'+
       '<td><span class="s '+b.statusCls+' ast">'+esc(b.statusText)+'</span></td>'+
-      '<td>—</td>'+
-      '<td>'+fmt(a.outputTokens)+'</td>'+
-      '<td class="adur" data-base="'+(a.elapsedMs??'')+'" data-run-state="'+(b.running?'1':'')+'">'+(b.elapsed!=null?ago(b.elapsed):'—')+'</td>'+
-      '<td>'+when(a.lastActivityAt)+'</td>'+
-      '<td class="badge">—</td></tr>'
+      '<td></td>'+
+      '<td>'+(a.outputTokens!=null?fmt(a.outputTokens):'')+'</td>'+
+      '<td class="adur" data-base="'+(a.elapsedMs??'')+'" data-run-state="'+(b.running?'1':'')+'">'+(b.elapsed!=null?ago(b.elapsed):'')+'</td>'+
+      '<td>'+(a.lastActivityAt?when(a.lastActivityAt):'')+'</td>'+
+      '<td></td></tr>'
   }
   return html
 }
