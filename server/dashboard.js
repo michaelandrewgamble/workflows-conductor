@@ -558,6 +558,10 @@ es.addEventListener('tick',()=>{refresh();refreshLive(true)})
 setInterval(()=>{if(live&&Array.isArray(live.active)&&(live.active.length+(live.unattributed||[]).length))refreshLive()},5000)
 setInterval(tickLive,1000)
 refresh();refreshLive(true);applyTheme()
+// deep-link: ?run=wf_x opens the run panel; &agent=<id> opens that agent's feed
+{const P=new URLSearchParams(location.search),r=P.get('run'),a=P.get('agent')
+ if(r&&a)setTimeout(()=>{expanded.add(r);ensureAgents(r);pickTail(r,a)},400)
+ else if(r)setTimeout(()=>{expanded.add(r);ensureAgents(r);pick(r)},400)}
 </script></body></html>`
 
 // A concurrent instance may already hold the port: exit quietly WITHOUT

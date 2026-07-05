@@ -9,9 +9,9 @@
   <img src="https://img.shields.io/badge/works%20in-Cursor%20·%20VS%20Code%20·%20CLI-4f46e5" alt="Works in Cursor, VS Code, and the CLI" />
 </p>
 
-<!-- TODO: docs/dashboard.png — dashboard mid-run with agent sub-rows expanded and the tail panel open -->
-
 ---
+
+<p align="center"><img src="docs/dashboard.png" width="920" alt="The Conductor dashboard: a unified run table grouped by project with an expanded run showing five agent sub-rows (per-agent tokens, durations, models), and the agent panel open — activity feed of tool calls with the agent's goal pinned as the footer" /></p>
 
 **Workflows Conductor** brings the missing `/workflows` experience to the Claude Code **VS Code / Cursor extension** — and goes past it. Claude Code's dynamic workflows fan work out across up to 16 concurrent subagents, but the extension has no way to watch them ([anthropics/claude-code#72292](https://github.com/anthropics/claude-code/issues/72292)); the interactive monitor exists only in the terminal TUI and the Desktop tasks pane. Conductor closes that gap with a **live dashboard** and a set of **`/conductor:*` slash commands**, built on a single architectural bet: *workflow state is just files*. Every run writes records, journals, and per-agent transcripts under `~/.claude/projects/` — so a careful reader can observe everything, from any surface, whether or not the session that launched it is even alive, **without spending a single model token**.
 
