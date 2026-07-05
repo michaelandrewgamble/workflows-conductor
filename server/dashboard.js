@@ -213,9 +213,9 @@ const PAGE = /* html */ `<!doctype html><html><head><meta charset="utf-8"><title
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--line:#e5e7eb;--card:#f9fafb;--acc:#4f46e5;--ok:#059669;--bad:#dc2626;--warn:#d97706}
-@media(prefers-color-scheme:dark){:root{--bg:#1e1e1e;--fg:#e5e7eb;--mut:#9ca3af;--line:#333842;--card:#252526;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}}
+@media(prefers-color-scheme:dark){:root{--bg:#181818;--fg:#e5e7eb;--mut:#9ca3af;--line:#2a2a2a;--card:#1f1f1f;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}}
 :root[data-theme=light]{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--line:#e5e7eb;--card:#f9fafb;--acc:#4f46e5;--ok:#059669;--bad:#dc2626;--warn:#d97706}
-:root[data-theme=dark]{--bg:#1e1e1e;--fg:#e5e7eb;--mut:#9ca3af;--line:#333842;--card:#252526;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
+:root[data-theme=dark]{--bg:#181818;--fg:#e5e7eb;--mut:#9ca3af;--line:#2a2a2a;--card:#1f1f1f;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-sans-serif,system-ui;background:var(--bg);color:var(--fg)}
 header{display:flex;gap:12px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 h1{font-size:16px;margin:0}#totals{color:var(--mut)}
@@ -227,7 +227,10 @@ main{display:block}
 section{overflow:auto;min-width:0;padding:0 0 8px}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
 th{color:var(--mut);font-weight:500;font-size:12px;position:sticky;top:0;background:var(--bg);cursor:pointer;user-select:none}
-tr.run{cursor:pointer}tr.run:hover{background:var(--card)}tr.sel{background:var(--card)}
+tr.run{cursor:pointer}
+tr.run:hover{background:color-mix(in srgb,var(--card) 55%,var(--bg))}
+tr.sel,tr.sel:hover{background:color-mix(in srgb,var(--acc) 10%,var(--bg))}
+tr.sel td:first-child{box-shadow:inset 2px 0 var(--acc)}
 tr.grp td{cursor:pointer;user-select:none;background:var(--card);color:var(--mut);font-size:12px;font-weight:600;max-width:none}
 .s{padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
 .s.completed{color:var(--ok)}.s.killed,.s.unreadable{color:var(--bad)}.s.live{color:var(--ok);border-color:var(--ok)}.s.stale{color:var(--warn)}.s.unk{color:var(--warn)}
