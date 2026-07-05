@@ -577,7 +577,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
 
 // The agent's goal: its task prompt is the FIRST line of its transcript
 // (type:user). Read only the head of the file — transcripts grow large.
-export async function readTranscriptPrompt(filePath, { maxBytes = 8192, maxChars = 300 } = {}) {
+export async function readTranscriptPrompt(filePath, { maxBytes = 32768, maxChars = 4000 } = {}) {
   if (!filePath) return null
   let fh = null
   try {

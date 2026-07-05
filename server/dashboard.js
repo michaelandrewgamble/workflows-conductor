@@ -190,7 +190,7 @@ const server = http.createServer(async (req, res) => {
       const ag = await getAgents(runId)
       const agent = ag.agents.find(a => a.agentId === agentId)
       if (!agent?.transcriptPath) return json(res, { error: 'no transcript for that agent' }, 404)
-      const goal = agent.promptPreview ?? await readTranscriptPrompt(agent.transcriptPath)
+      const goal = (await readTranscriptPrompt(agent.transcriptPath)) ?? agent.promptPreview
       return json(res, { runId, agentId, goal, label: agent.label ?? null, ...(await parseTranscriptTail(agent.transcriptPath)) })
     }
     if (url.pathname.startsWith('/api/run/')) return json(res, await getRun(url.pathname.split('/')[3]))
@@ -216,7 +216,7 @@ const PAGE = /* html */ `<!doctype html><html><head><meta charset="utf-8"><title
 @media(prefers-color-scheme:dark){:root{--bg:#181818;--fg:#e5e7eb;--mut:#9ca3af;--line:#2a2a2a;--card:#1f1f1f;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}}
 :root[data-theme=light]{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--line:#e5e7eb;--card:#f9fafb;--acc:#4f46e5;--ok:#059669;--bad:#dc2626;--warn:#d97706}
 :root[data-theme=dark]{--bg:#181818;--fg:#e5e7eb;--mut:#9ca3af;--line:#2a2a2a;--card:#1f1f1f;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
-*{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-sans-serif,system-ui;background:var(--bg);color:var(--fg)}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-sans-serif,system-ui;background:var(--bg);color:var(--fg);overflow-x:hidden}
 header{display:flex;gap:12px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 h1{font-size:16px;margin:0}#totals{color:var(--mut)}
 #filter{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:13px;width:220px}
@@ -238,7 +238,7 @@ tr.grp td{cursor:pointer;user-select:none;background:var(--card);color:var(--mut
 #detail.open{display:flex;flex-direction:column}
 #dhead{display:flex;align-items:flex-start;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
 #dtitle{flex:1;min-width:0}
-#dbody{flex:1;overflow:auto;padding:12px 16px}
+#dbody{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px 16px}
 #dfoot{border-top:1px solid var(--line);padding:10px 16px;background:var(--card)}
 #dfoot:empty{display:none}
 #close{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;width:26px;height:26px;cursor:pointer;font:inherit;line-height:1;flex:none}
@@ -254,10 +254,10 @@ tr.sub td{padding:4px 10px;border-bottom:1px dashed var(--line);background:color
 tr.sub td:first-child{padding-left:26px}
 tr.sub:hover td{background:var(--card)}
 tr.sub .act{color:var(--mut);font-size:11px}
-.tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px}
-.tev .tool{color:var(--acc)}.tev .badge{display:block}
+.tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px;overflow-wrap:anywhere}
+.tev .tool{color:var(--acc)}.tev .badge{display:block;overflow-wrap:anywhere}
 .badge{font-size:11px;color:var(--mut)}
-section,#dbody,pre{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--mut) 30%,transparent) transparent}
+section,#dbody,pre,.goal{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--mut) 30%,transparent) transparent}
 section::-webkit-scrollbar,#dbody::-webkit-scrollbar,pre::-webkit-scrollbar{width:8px;height:8px;background:transparent}
 section::-webkit-scrollbar-thumb,#dbody::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--mut) 30%,transparent);border-radius:4px}
 section::-webkit-scrollbar-thumb:hover,#dbody::-webkit-scrollbar-thumb:hover,pre::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--mut) 55%,transparent)}
@@ -267,7 +267,7 @@ button.info{cursor:pointer;color:var(--mut);background:transparent;border:0;padd
 tr.run:hover button.info{opacity:1}
 button.info:hover{color:var(--acc);background:var(--card);opacity:1}
 #themec{cursor:pointer;background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:inherit;font-size:12px}
-.goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word}
+.goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word;max-height:132px;overflow-y:auto;white-space:pre-wrap}
 .goal b{color:var(--mut);font-size:11px;text-transform:uppercase;margin-right:6px}
 #sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 #sf button{background:var(--bg);color:var(--mut);border:0;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
