@@ -22,6 +22,11 @@ export function encodeCwd(cwd) {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
+// Display hygiene: never show the user's home path (and thus their OS
+// username) in goals, tool summaries, or snippets — ~ reads better anyway.
+const HOME = os.homedir()
+function tidy(s) { return typeof s === 'string' ? s.split(HOME).join('~') : s }
+
 async function safeReaddir(dir) {
   try { return await fs.readdir(dir, { withFileTypes: true }) } catch { return [] }
 }
@@ -409,9 +414,9 @@ export async function parseTranscriptTail(filePath, { maxBytes = 65536, maxEvent
         if (block.type === 'tool_use') {
           let summary
           try { summary = JSON.stringify(block.input ?? null) ?? 'null' } catch { summary = String(block.input) }
-          events.push({ kind: 'tool', at, tool: block.name ?? null, summary: summary.slice(0, 120) })
+          events.push({ kind: 'tool', at, tool: block.name ?? null, summary: tidy(summary.slice(0, 160)) })
         } else if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-          events.push({ kind: 'text', at, snippet: block.text.slice(0, 160) })
+          events.push({ kind: 'text', at, snippet: tidy(block.text.slice(0, 200)) })
         }
       }
     } else if (line.type === 'user' && Array.isArray(line.message?.content) &&
@@ -591,7 +596,7 @@ export async function readTranscriptPrompt(filePath, { maxBytes = 32768, maxChar
     let text = null
     if (typeof c === 'string') text = c
     else if (Array.isArray(c)) text = c.find(b => b?.type === 'text' && typeof b.text === 'string')?.text ?? null
-    return text ? text.trim().slice(0, maxChars) : null
+    return text ? tidy(text.trim().slice(0, maxChars)) : null
   } catch { return null } finally { if (fh) await fh.close().catch(() => {}) }
 }
 
