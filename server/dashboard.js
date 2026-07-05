@@ -147,7 +147,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    if (url.pathname === '/') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(PAGE) }
+    // no-store: Simple Browser/embedded webviews cache aggressively; a stale
+    // page after a dashboard upgrade looks like broken features.
+    if (url.pathname === '/') { res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' }); return res.end(PAGE) }
     if (url.pathname === '/api/runs') {
       const runs = await listRuns({ scope: 'all', limit: Number(url.searchParams.get('limit') || 100) })
       const hookLive = await liveFromHookEvents({ recordedIds: new Set(runs.runs.map(r => r.runId)) })
@@ -243,7 +245,6 @@ const shortProj=p=>{const s=String(p||'').split('-').filter(Boolean);return s.le
 // so sort/filter/grouping/collapsed/selection all survive SSE-triggered refreshes.
 let sel=null,sortKey='timestamp',sortDir=-1,filter='',statusFilter='all',groupOn=true,data=null
 const collapsed=new Set()
-// finished-run expansion: agents fetched lazily, cached per runId
 const expanded=new Set(),agentsCache=new Map(),agFetching=new Set()
 async function ensureAgents(runId){
   if(agentsCache.has(runId)||agFetching.has(runId))return
