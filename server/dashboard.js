@@ -224,6 +224,8 @@ tr.sub .act{color:var(--mut);font-size:11px}
 .tev .tool{color:var(--acc)}.tev .badge{display:block}
 .badge{font-size:11px;color:var(--mut)}
 .xp{cursor:pointer;color:var(--mut);display:inline-block;width:14px}
+.info{cursor:pointer;color:var(--mut);margin-left:6px;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:0 5px;display:inline-block;line-height:1.4}
+.info:hover{color:var(--fg);border-color:var(--acc)}
 .goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word}
 .goal b{color:var(--mut);font-size:11px;text-transform:uppercase;margin-right:6px}
 #sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
@@ -291,7 +293,7 @@ function rowHtml(r){
   const cls=r.isLive?(r.status.startsWith('stale')?'stale':'live'):(r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk'))
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
   const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
-  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+esc(r.runId)+(r.noPick?'':'<span class="info" title="run summary">i</span>')+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
   // Agent sub-rows use the SAME columns as runs. Live rows always show them;
   // finished rows expand on demand (agents fetched lazily into agentsCache).
   if(r.isLive)for(const a of r.agents)html+=subRowHtml(r.runId,a,drift)
@@ -430,15 +432,16 @@ function pickTail(runId,agentId){
   loadTail(runId,agentId)
 }
 function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
+// Run summary panel (ⓘ icon). Agent listing lives in the table sub-rows —
+// not repeated here.
 async function loadDetail(id){
-  const [run,ag]=await Promise.all([q('/api/run/'+encodeURIComponent(id)),q('/api/agents/'+encodeURIComponent(id))])
+  const run=await q('/api/run/'+encodeURIComponent(id))
   if(sel!==id)return
-  const agents=(ag.agents||[]).map(a=>'<div class="agent"><b>'+esc(a.label??a.agentId)+'</b> <span class="badge">'+esc(a.state??(a.finished?'done':a.started?'started':'?'))+(a.tokens?' · '+fmt(a.tokens)+' tok':'')+(a.model?' · '+esc(shortModel(a.model)):'')+'</span>'+(a.promptPreview?'<div class="mut">'+esc(a.promptPreview)+'</div>':'')+(a.transcriptPath?'<span class="mut">'+esc(a.transcriptPath)+'</span>':'')+'</div>').join('')
-  const head=run.found===false
-    ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet (details below come from the live journal/transcripts)</div>'
-    :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+(run.error?'<br>error: '+esc(run.error):'')+'</div>'+
-      (run.summary?'<p>'+esc(run.summary)+'</p>':'')+(run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'')
-  document.getElementById('dbody').innerHTML=head+'<h2>Agents ('+(ag.agents||[]).length+')</h2>'+agents
+  document.getElementById('dbody').innerHTML=run.found===false
+    ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet; expand the row for live agents</div>'
+    :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+' · '+fmt(run.agentCount)+' agents'+(run.error?'<br>error: '+esc(run.error):'')+'</div>'+
+      (run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':'')+
+      (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'')
 }
 // pointerdown, not click: fires before any re-render can replace the target.
 document.getElementById('rows').addEventListener('pointerdown',e=>{
@@ -447,12 +450,10 @@ document.getElementById('rows').addEventListener('pointerdown',e=>{
   if(tr.classList.contains('sub')){if(tr.dataset.agent)pickTail(tr.dataset.run,tr.dataset.agent);return}
   const id=tr.dataset.id
   if(!id||tr.dataset.nopick)return
-  if(e.target.closest('.xp')){                      // caret: toggle only, no drawer
-    expanded.has(id)?expanded.delete(id):(expanded.add(id),ensureAgents(id))
-    render();return
-  }
-  pick(id)                                          // row: drawer + expand
-  if(!expanded.has(id)){expanded.add(id);ensureAgents(id);render()}
+  if(e.target.closest('.info')){pick(id);return}    // info icon: run summary panel only
+  if(tr.classList.contains('lrun'))return           // live rows are always expanded
+  expanded.has(id)?expanded.delete(id):(expanded.add(id),ensureAgents(id))
+  render()                                          // row or caret click: toggle sub-rows only
 })
 document.getElementById('sf').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return
