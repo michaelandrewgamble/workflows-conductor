@@ -234,9 +234,14 @@ tr.sel td:first-child{box-shadow:inset 2px 0 var(--acc)}
 tr.grp td{cursor:pointer;user-select:none;background:var(--card);color:var(--mut);font-size:12px;font-weight:600;max-width:none}
 .s{padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
 .s.completed{color:var(--ok)}.s.killed,.s.unreadable{color:var(--bad)}.s.live{color:var(--ok);border-color:var(--ok)}.s.stale{color:var(--warn)}.s.unk{color:var(--warn)}
-#detail{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:100vw;background:var(--bg);border-left:1px solid var(--line);box-shadow:-6px 0 24px rgba(0,0,0,.18);overflow:auto;padding:16px 20px;z-index:20;display:none}
-#detail.open{display:block}
-#close{position:sticky;top:0;float:right;background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;width:26px;height:26px;cursor:pointer;font:inherit;line-height:1;z-index:1}
+#detail{position:fixed;top:0;right:0;bottom:0;width:460px;max-width:100vw;background:var(--bg);border-left:1px solid var(--line);box-shadow:-6px 0 24px rgba(0,0,0,.18);z-index:20;display:none}
+#detail.open{display:flex;flex-direction:column}
+#dhead{display:flex;align-items:flex-start;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+#dtitle{flex:1;min-width:0}
+#dbody{flex:1;overflow:auto;padding:12px 16px}
+#dfoot{border-top:1px solid var(--line);padding:10px 16px;background:var(--card)}
+#dfoot:empty{display:none}
+#close{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;width:26px;height:26px;cursor:pointer;font:inherit;line-height:1;flex:none}
 #detail h2{font-size:14px;margin:0 0 4px}#detail .mut{color:var(--mut);font-size:12px}
 .agent{padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--card)}
 .agent b{font-size:12px}.agent .mut{display:block;font-size:11px;word-break:break-all}
@@ -252,11 +257,11 @@ tr.sub .act{color:var(--mut);font-size:11px}
 .tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px}
 .tev .tool{color:var(--acc)}.tev .badge{display:block}
 .badge{font-size:11px;color:var(--mut)}
-section,#detail,pre{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--mut) 30%,transparent) transparent}
-section::-webkit-scrollbar,#detail::-webkit-scrollbar,pre::-webkit-scrollbar{width:8px;height:8px;background:transparent}
-section::-webkit-scrollbar-thumb,#detail::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--mut) 30%,transparent);border-radius:4px}
-section::-webkit-scrollbar-thumb:hover,#detail::-webkit-scrollbar-thumb:hover,pre::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--mut) 55%,transparent)}
-section::-webkit-scrollbar-track,#detail::-webkit-scrollbar-track,pre::-webkit-scrollbar-track{background:transparent}
+section,#dbody,pre{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--mut) 30%,transparent) transparent}
+section::-webkit-scrollbar,#dbody::-webkit-scrollbar,pre::-webkit-scrollbar{width:8px;height:8px;background:transparent}
+section::-webkit-scrollbar-thumb,#dbody::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--mut) 30%,transparent);border-radius:4px}
+section::-webkit-scrollbar-thumb:hover,#dbody::-webkit-scrollbar-thumb:hover,pre::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--mut) 55%,transparent)}
+section::-webkit-scrollbar-track,#dbody::-webkit-scrollbar-track,pre::-webkit-scrollbar-track{background:transparent}
 .xp{cursor:pointer;color:var(--mut);display:inline-block;width:14px}
 button.info{cursor:pointer;color:var(--mut);background:transparent;border:0;padding:2px;margin-right:6px;border-radius:5px;display:inline-flex;align-items:center;vertical-align:-3px;opacity:.55}
 tr.run:hover button.info{opacity:1}
@@ -270,7 +275,7 @@ button.info:hover{color:var(--acc);background:var(--card);opacity:1}
 </style></head><body>
 <header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><span id="sf"><button data-f="all" class="on">all</button><button data-f="active">active</button><button data-f="done">finished</button></span><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><button id="themec" title="theme source"></button><span id="dot" title="SSE"></span></header>
 <main><section><table><thead><tr id="hdr"></tr></thead><tbody id="rows"></tbody></table></section></main>
-<aside id="detail"><button id="close" title="close (Esc)">✕</button><div id="dbody"></div></aside>
+<aside id="detail"><div id="dhead"><div id="dtitle"></div><button id="close" title="close (Esc)">✕</button></div><div id="dbody"></div><div id="dfoot"></div></aside>
 <script>
 const T=new URLSearchParams(location.search).get('t')
 const q=p=>fetch(p+(p.includes('?')?'&':'?')+'t='+T).then(r=>r.json())
@@ -457,27 +462,36 @@ async function loadTail(runId,agentId){
     if(e.kind==='text')return '<div class="tev">'+esc(e.snippet??'')+'</div>'
     return '<div class="tev badge">↳ tool result</div>'
   }).join('')
-  const d=document.getElementById('detail')
-  const nearBottom=d.scrollHeight-d.scrollTop-d.clientHeight<80
-  document.getElementById('dbody').innerHTML='<h2>agent '+esc(t.label??agentId.slice(0,10))+'</h2><div class="mut">'+esc(runId)+' · '+esc(agentId.slice(0,10))+
-    (t.outputTokens?' · '+fmt(t.outputTokens)+' output tok (window)':'')+'</div>'+
-    (t.goal?'<div class="goal"><b>goal</b> '+esc(t.goal)+'</div>':'')+
-    (evs||'<span class="badge">no parsed events in the tail window yet</span>')
-  const wasOpen=d.classList.contains('open')
-  d.classList.add('open')
-  if(!wasOpen||nearBottom)d.scrollTop=d.scrollHeight   // autoscroll only when following the tail
+  document.getElementById('dtitle').innerHTML='<h2>'+esc(t.label??('agent '+agentId.slice(0,10)+'…'))+'</h2><div class="mut">'+esc(runId)+' · '+esc(agentId.slice(0,10))+'…'+
+    (t.model?' · '+esc(String(t.model).replace(/^claude-/,'')):'')+(t.outputTokens?' · '+fmt(t.outputTokens)+' output tok (window)':'')+'</div>'
+  document.getElementById('dfoot').innerHTML=t.goal?'<div class="goal"><b>goal</b>'+esc(t.goal)+'</div>':''
+  const body=document.getElementById('dbody')
+  const nearBottom=body.scrollHeight-body.scrollTop-body.clientHeight<80
+  const hadContent=!!body.querySelector('.tev')
+  body.innerHTML=evs||'<span class="badge">no parsed events in the tail window yet</span>'
+  if(!hadContent||nearBottom)body.scrollTop=body.scrollHeight   // chat-style: follow the newest unless reading back
 }
 async function refresh(){
   data=await q('/api/runs')
   render()
   if(sel)loadDetail(sel)
 }
-function pick(id){selTail=null;sel=id;render();const d=document.getElementById('detail');d.classList.add('open');d.scrollTop=0;loadDetail(id)}
+function pick(id){
+  selTail=null;sel=id;render()
+  document.getElementById('detail').classList.add('open')
+  document.getElementById('dtitle').innerHTML='<h2>'+esc(id)+'</h2>'
+  document.getElementById('dbody').innerHTML='<span class="badge">loading…</span>'
+  document.getElementById('dfoot').innerHTML=''
+  document.getElementById('dbody').scrollTop=0
+  loadDetail(id)
+}
 function pickTail(runId,agentId){
   sel=null;selTail={runId,agentId};render()
   // instant feedback: open with a placeholder before the fetch resolves
+  document.getElementById('detail').classList.add('open')
+  document.getElementById('dtitle').innerHTML='<h2>agent '+esc(agentId.slice(0,10))+'…</h2><div class="mut">'+esc(runId)+'</div>'
   document.getElementById('dbody').innerHTML='<span class="badge">loading agent feed…</span>'
-  const d=document.getElementById('detail');d.classList.add('open');d.scrollTop=0
+  document.getElementById('dfoot').innerHTML=''
   loadTail(runId,agentId)
 }
 function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
@@ -486,11 +500,14 @@ function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;
 async function loadDetail(id){
   const run=await q('/api/run/'+encodeURIComponent(id))
   if(sel!==id)return
+  document.getElementById('dtitle').innerHTML=run.found===false
+    ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet</div>'
+    :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+' · '+fmt(run.agentCount)+' agents</div>'
   document.getElementById('dbody').innerHTML=run.found===false
-    ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet; expand the row for live agents</div>'
-    :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+' · '+fmt(run.agentCount)+' agents'+(run.error?'<br>error: '+esc(run.error):'')+'</div>'+
-      (run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':'')+
-      (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'')
+    ?'<span class="badge">expand the row to see live agents</span>'
+    :(run.error?'<div class="goal"><b>error</b>'+esc(run.error)+'</div>':'')+
+     (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\n… (truncated)':'')+'</pre>':'<span class="badge">no result recorded</span>')
+  document.getElementById('dfoot').innerHTML=run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':''
 }
 // pointerdown, not click: fires before any re-render can replace the target.
 document.getElementById('rows').addEventListener('pointerdown',e=>{
