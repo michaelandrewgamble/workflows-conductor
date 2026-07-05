@@ -176,6 +176,8 @@ File-based, no dependency on the private IDE bridge, works whether or not any CL
 
 ### 2.6 What requires Anthropic (filed as upstream asks, not built around)
 
+**Filed 2026-07-05**: [#74334](https://github.com/anthropics/claude-code/issues/74334) (run-control API), [#74335](https://github.com/anthropics/claude-code/issues/74335) (incremental run-state persistence + schema versioning), [#74336](https://github.com/anthropics/claude-code/issues/74336) (plugin UI surface), plus a supporting comment on #72292.
+
 1. `/workflows` panel / Desktop-tasks-pane parity in the extension (#72292 — the reason this plugin exists; Desktop already ships the pane, so the precedent exists in-house).
 2. Incremental persistence of run state (`running`/`paused`, per-phase completion) to `wf_*.json` — would delete our heuristics.
 3. Workflow run-control API (pause/resume/stop by runId) in SDK or CLI flags.
