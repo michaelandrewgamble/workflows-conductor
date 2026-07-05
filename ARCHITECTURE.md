@@ -182,6 +182,19 @@ File-based, no dependency on the private IDE bridge, works whether or not any CL
 4. Plugin UI contribution point (webview/panel) — would move the dashboard into the IDE.
 5. Documented/stabilized `wf_*.json` + journal schema.
 
+### 2.6b Considered and deliberately deferred (2026-07-04)
+
+Dashboard action buttons (save/re-run/stop) were designed but not built. Run
+control is ownership-bound: a dashboard Stop could only govern headless
+`claude -p` children the dashboard itself spawned — a run category that
+exists only to be managed. The user's runs are chat-launched, and the owning
+chat already provides stop/resume conversationally (TaskStop / Workflow
+resumeFromRunId) plus `/conductor:rerun`. Revisit only if dashboard-initiated
+execution becomes a real need, or if Anthropic ships an external run-control
+API (§2.6 ask #3). A speculative plugin-monitor control channel (dashboard →
+control file → monitor wakes owning session's model) is unverified and
+likewise parked.
+
 ### 2.7 Plugin Dev Toolkit verdict
 
 Use `/plugin-dev:create-plugin` for scaffold, manifest validation, and skill review only. The reader, MCP server, and dashboard are hand-built — the toolkit's guided flow targets skill/hook-centric plugins, not engine-heavy ones. Hybrid: toolkit for structure and validation gates, manual for the engine.
