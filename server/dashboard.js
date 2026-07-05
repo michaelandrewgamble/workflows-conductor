@@ -491,10 +491,16 @@ async function loadDetail(id){
 document.getElementById('rows').addEventListener('pointerdown',e=>{
   const tr=e.target.closest('tr');if(!tr)return
   if(tr.dataset.gk!==undefined){const k=tr.dataset.gk;collapsed.has(k)?collapsed.delete(k):collapsed.add(k);render();return}
-  if(tr.classList.contains('sub')){if(tr.dataset.agent)pickTail(tr.dataset.run,tr.dataset.agent);return}
+  if(tr.classList.contains('sub')){
+    if(!tr.dataset.agent)return
+    // toggle: clicking the already-open agent closes the panel
+    if(selTail&&selTail.runId===tr.dataset.run&&selTail.agentId===tr.dataset.agent)closeDrawer()
+    else pickTail(tr.dataset.run,tr.dataset.agent)
+    return
+  }
   const id=tr.dataset.id
   if(!id||tr.dataset.nopick)return
-  if(e.target.closest('.info')){pick(id);return}    // info icon: run summary panel only
+  if(e.target.closest('.info')){sel===id?closeDrawer():pick(id);return}   // info icon toggles the run panel
   if(tr.classList.contains('lrun'))return           // live rows are always expanded
   expanded.has(id)?expanded.delete(id):(expanded.add(id),ensureAgents(id))
   render()                                          // row or caret click: toggle sub-rows only
