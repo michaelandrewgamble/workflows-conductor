@@ -506,7 +506,7 @@ async function loadDetail(id){
   document.getElementById('dbody').innerHTML=run.found===false
     ?'<span class="badge">expand the row to see live agents</span>'
     :(run.error?'<div class="goal"><b>error</b>'+esc(run.error)+'</div>':'')+
-     (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\n… (truncated)':'')+'</pre>':'<span class="badge">no result recorded</span>')
+     (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'<span class="badge">no result recorded</span>')
   document.getElementById('dfoot').innerHTML=run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':''
 }
 // pointerdown, not click: fires before any re-render can replace the target.
