@@ -252,6 +252,11 @@ tr.sub .act{color:var(--mut);font-size:11px}
 .tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px}
 .tev .tool{color:var(--acc)}.tev .badge{display:block}
 .badge{font-size:11px;color:var(--mut)}
+section,#detail,pre{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--mut) 30%,transparent) transparent}
+section::-webkit-scrollbar,#detail::-webkit-scrollbar,pre::-webkit-scrollbar{width:8px;height:8px;background:transparent}
+section::-webkit-scrollbar-thumb,#detail::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--mut) 30%,transparent);border-radius:4px}
+section::-webkit-scrollbar-thumb:hover,#detail::-webkit-scrollbar-thumb:hover,pre::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--mut) 55%,transparent)}
+section::-webkit-scrollbar-track,#detail::-webkit-scrollbar-track,pre::-webkit-scrollbar-track{background:transparent}
 .xp{cursor:pointer;color:var(--mut);display:inline-block;width:14px}
 button.info{cursor:pointer;color:var(--mut);background:transparent;border:0;padding:2px;margin-right:6px;border-radius:5px;display:inline-flex;align-items:center;vertical-align:-3px;opacity:.55}
 tr.run:hover button.info{opacity:1}
@@ -467,12 +472,12 @@ async function refresh(){
   render()
   if(sel)loadDetail(sel)
 }
-function pick(id){selTail=null;sel=id;render();document.getElementById('detail').classList.add('open');loadDetail(id)}
+function pick(id){selTail=null;sel=id;render();const d=document.getElementById('detail');d.classList.add('open');d.scrollTop=0;loadDetail(id)}
 function pickTail(runId,agentId){
   sel=null;selTail={runId,agentId};render()
   // instant feedback: open with a placeholder before the fetch resolves
   document.getElementById('dbody').innerHTML='<span class="badge">loading agent feed…</span>'
-  document.getElementById('detail').classList.add('open')
+  const d=document.getElementById('detail');d.classList.add('open');d.scrollTop=0
   loadTail(runId,agentId)
 }
 function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
