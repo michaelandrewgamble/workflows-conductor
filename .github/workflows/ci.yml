@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reader test suite
+        run: node --test server/reader.test.js
+      - name: Server syntax
+        run: node --check server/index.js && node --check server/dashboard.js && node --check server/cli.js
+      - name: Client script parses as served
+        run: node scripts/check-client.mjs
+      - name: Manifests are valid JSON with required fields
+        run: |
+          node -e "
+            const p = require('./.claude-plugin/plugin.json')
+            const m = require('./.claude-plugin/marketplace.json')
+            if (!p.name || !p.description) throw new Error('plugin.json missing required fields')
+            if (!m.name || !m.owner || !m.plugins?.length) throw new Error('marketplace.json missing required fields')
+            console.log('manifests ok:', p.name, p.version)
+          "

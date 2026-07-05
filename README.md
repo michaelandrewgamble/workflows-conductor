@@ -3,6 +3,7 @@
 <p align="center">Mission control for Claude Code dynamic workflows — live agent observability, cross-project run history, and save/re-run, on every surface Claude Code runs.</p>
 
 <p align="center">
+  <a href="https://github.com/michaelandrewgamble/workflows-conductor/actions/workflows/ci.yml"><img src="https://github.com/michaelandrewgamble/workflows-conductor/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-4f46e5" alt="MIT license" /></a>
   <img src="https://img.shields.io/badge/runtime%20deps-zero-4f46e5" alt="Zero runtime dependencies" />
   <img src="https://img.shields.io/badge/monitoring%20cost-0%20tokens-4f46e5" alt="Zero-token monitoring" />
