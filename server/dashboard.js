@@ -8,7 +8,7 @@ import http from 'node:http'
 import { promises as fs, watch } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { listRuns, getRun, getAgents, getLiveAgents, parseTranscriptTail, DEFAULT_PROJECTS_DIR } from './reader.js'
+import { listRuns, getRun, getAgents, getLiveAgents, parseTranscriptTail, readTranscriptPrompt, DEFAULT_PROJECTS_DIR } from './reader.js'
 
 const PORT = Number(process.env.CONDUCTOR_PORT || 7423)
 const TOKEN = process.env.CONDUCTOR_TOKEN
@@ -164,7 +164,8 @@ const server = http.createServer(async (req, res) => {
       const ag = await getAgents(runId)
       const agent = ag.agents.find(a => a.agentId === agentId)
       if (!agent?.transcriptPath) return json(res, { error: 'no transcript for that agent' }, 404)
-      return json(res, { runId, agentId, ...(await parseTranscriptTail(agent.transcriptPath)) })
+      const goal = agent.promptPreview ?? await readTranscriptPrompt(agent.transcriptPath)
+      return json(res, { runId, agentId, goal, label: agent.label ?? null, ...(await parseTranscriptTail(agent.transcriptPath)) })
     }
     if (url.pathname.startsWith('/api/run/')) return json(res, await getRun(url.pathname.split('/')[3]))
     if (url.pathname.startsWith('/api/agents/')) return json(res, await getAgents(url.pathname.split('/')[3]))
@@ -220,6 +221,9 @@ tr.sub .act{color:var(--mut);font-size:11px}
 .tev{border-left:2px solid var(--line);padding:2px 8px;margin:4px 0;font-size:12px}
 .tev .tool{color:var(--acc)}.tev .badge{display:block}
 .badge{font-size:11px;color:var(--mut)}
+.xp{cursor:pointer;color:var(--mut);display:inline-block;width:14px}
+.goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word}
+.goal b{color:var(--mut);font-size:11px;text-transform:uppercase;margin-right:6px}
 #sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 #sf button{background:var(--bg);color:var(--mut);border:0;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
 #sf button.on{background:var(--card);color:var(--fg)}
@@ -239,6 +243,14 @@ const shortProj=p=>{const s=String(p||'').split('-').filter(Boolean);return s.le
 // so sort/filter/grouping/collapsed/selection all survive SSE-triggered refreshes.
 let sel=null,sortKey='timestamp',sortDir=-1,filter='',statusFilter='all',groupOn=true,data=null
 const collapsed=new Set()
+// finished-run expansion: agents fetched lazily, cached per runId
+const expanded=new Set(),agentsCache=new Map(),agFetching=new Set()
+async function ensureAgents(runId){
+  if(agentsCache.has(runId)||agFetching.has(runId))return
+  agFetching.add(runId)
+  try{const r=await q('/api/agents/'+encodeURIComponent(runId));if(Array.isArray(r.agents))agentsCache.set(runId,r.agents)}catch{}
+  agFetching.delete(runId);render()
+}
 const COLS=[['runId','run'],['workflowName','name'],['status','status'],['agentCount','agents'],['totalTokens','tokens'],['durationMs','dur'],['defaultModel','model'],['timestamp','when'],['projectDir','project']]
 const shortModel=m=>m?String(m).replace(/^claude-/,''):''
 const NUM=new Set(['agentCount','totalTokens','durationMs'])
@@ -278,24 +290,31 @@ function rowHtml(r){
   const cls=r.isLive?(r.status.startsWith('stale')?'stale':'live'):(r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk'))
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
   const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
-  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':'')+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
-  // Agent sub-rows use the SAME columns as runs: id · label · status ·
-  // (agents) · tokens · dur · when · (project). Current-action detail lives
-  // in the click-through drawer, not the table.
-  if(r.isLive)for(const a of r.agents){
-    const b=agentBadge(a,drift)
-    html+='<tr class="sub" data-run="'+esc(r.runId)+'" data-agent="'+esc(a.agentId)+'">'+
-      '<td><span class="'+b.dot+'"></span>'+esc(a.agentId.slice(0,10))+'</td>'+
-      '<td class="badge">'+esc(a.label??'')+'</td>'+
-      '<td><span class="s '+b.statusCls+' ast">'+esc(b.statusText)+'</span></td>'+
-      '<td></td>'+
-      '<td>'+(a.outputTokens!=null?fmt(a.outputTokens):'')+'</td>'+
-      '<td class="adur" data-base="'+(a.elapsedMs??'')+'" data-run-state="'+(b.running?'1':'')+'">'+(b.elapsed!=null?ago(b.elapsed):'')+'</td>'+
-      '<td class="badge">'+esc(shortModel(a.model))+'</td>'+
-      '<td>'+(a.lastActivityAt?when(a.lastActivityAt):'')+'</td>'+
-      '<td></td></tr>'
+  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  // Agent sub-rows use the SAME columns as runs. Live rows always show them;
+  // finished rows expand on demand (agents fetched lazily into agentsCache).
+  if(r.isLive)for(const a of r.agents)html+=subRowHtml(r.runId,a,drift)
+  else if(expanded.has(r.runId)){
+    const ags=agentsCache.get(r.runId)
+    if(ags)for(const a of ags)html+=subRowHtml(r.runId,a,0)
+    else html+='<tr class="sub"><td colspan=9 class="badge">loading agents…</td></tr>'
   }
   return html
+}
+function subRowHtml(runId,a,drift){
+  const b=agentBadge(a,drift)
+  const tok=a.outputTokens??a.tokens
+  const durMs=a.elapsedMs??a.durationMs
+  return '<tr class="sub" data-run="'+esc(runId)+'" data-agent="'+esc(a.agentId)+'">'+
+    '<td><span class="'+b.dot+'"></span>'+esc(a.agentId.slice(0,10))+'</td>'+
+    '<td class="badge">'+esc(a.label??'')+'</td>'+
+    '<td><span class="s '+b.statusCls+' ast">'+esc(b.statusText)+'</span></td>'+
+    '<td></td>'+
+    '<td>'+(tok!=null?fmt(tok):'')+'</td>'+
+    '<td class="adur" data-base="'+(a.elapsedMs??'')+'" data-run-state="'+(b.running?'1':'')+'">'+(durMs!=null?(b.running?ago(b.elapsed):dur(durMs)):'')+'</td>'+
+    '<td class="badge">'+esc(shortModel(a.model))+'</td>'+
+    '<td>'+(a.lastActivityAt?when(a.lastActivityAt):'')+'</td>'+
+    '<td></td></tr>'
 }
 function render(){
   if(!data&&!live)return
@@ -388,8 +407,9 @@ async function loadTail(runId,agentId){
   }).join('')
   const d=document.getElementById('detail')
   const nearBottom=d.scrollHeight-d.scrollTop-d.clientHeight<80
-  document.getElementById('dbody').innerHTML='<h2>agent '+esc(agentId.slice(0,10))+'…</h2><div class="mut">'+esc(runId)+
+  document.getElementById('dbody').innerHTML='<h2>agent '+esc(t.label??agentId.slice(0,10))+'</h2><div class="mut">'+esc(runId)+' · '+esc(agentId.slice(0,10))+
     (t.outputTokens?' · '+fmt(t.outputTokens)+' output tok (window)':'')+'</div>'+
+    (t.goal?'<div class="goal"><b>goal</b> '+esc(t.goal)+'</div>':'')+
     (evs||'<span class="badge">no parsed events in the tail window yet</span>')
   const wasOpen=d.classList.contains('open')
   d.classList.add('open')
@@ -412,7 +432,7 @@ function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;
 async function loadDetail(id){
   const [run,ag]=await Promise.all([q('/api/run/'+encodeURIComponent(id)),q('/api/agents/'+encodeURIComponent(id))])
   if(sel!==id)return
-  const agents=(ag.agents||[]).map(a=>'<div class="agent"><b>'+esc(a.label??a.agentId)+'</b> <span class="badge">'+esc(a.state??(a.finished?'done':a.started?'started':'?'))+(a.tokens?' · '+fmt(a.tokens)+' tok':'')+'</span>'+(a.transcriptPath?'<span class="mut">'+esc(a.transcriptPath)+'</span>':'')+'</div>').join('')
+  const agents=(ag.agents||[]).map(a=>'<div class="agent"><b>'+esc(a.label??a.agentId)+'</b> <span class="badge">'+esc(a.state??(a.finished?'done':a.started?'started':'?'))+(a.tokens?' · '+fmt(a.tokens)+' tok':'')+(a.model?' · '+esc(shortModel(a.model)):'')+'</span>'+(a.promptPreview?'<div class="mut">'+esc(a.promptPreview)+'</div>':'')+(a.transcriptPath?'<span class="mut">'+esc(a.transcriptPath)+'</span>':'')+'</div>').join('')
   const head=run.found===false
     ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet (details below come from the live journal/transcripts)</div>'
     :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+(run.error?'<br>error: '+esc(run.error):'')+'</div>'+
@@ -423,8 +443,15 @@ async function loadDetail(id){
 document.getElementById('rows').addEventListener('pointerdown',e=>{
   const tr=e.target.closest('tr');if(!tr)return
   if(tr.dataset.gk!==undefined){const k=tr.dataset.gk;collapsed.has(k)?collapsed.delete(k):collapsed.add(k);render();return}
-  if(tr.classList.contains('sub'))return pickTail(tr.dataset.run,tr.dataset.agent)
-  if(tr.dataset.id&&!tr.dataset.nopick)pick(tr.dataset.id)
+  if(tr.classList.contains('sub')){if(tr.dataset.agent)pickTail(tr.dataset.run,tr.dataset.agent);return}
+  const id=tr.dataset.id
+  if(!id||tr.dataset.nopick)return
+  if(e.target.closest('.xp')){                      // caret: toggle only, no drawer
+    expanded.has(id)?expanded.delete(id):(expanded.add(id),ensureAgents(id))
+    render();return
+  }
+  pick(id)                                          // row: drawer + expand
+  if(!expanded.has(id)){expanded.add(id);ensureAgents(id);render()}
 })
 document.getElementById('sf').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return

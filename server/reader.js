@@ -285,6 +285,7 @@ export async function getAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR } = 
             phaseTitle: e.phaseTitle ?? null, model: e.model ?? null,
             tokens: e.tokens ?? null, toolCalls: e.toolCalls ?? null,
             durationMs: e.durationMs ?? null, resultPreview: e.resultPreview ?? null,
+            promptPreview: e.promptPreview ?? null,
             source: 'record',
           })
         }
@@ -542,6 +543,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
     a.currentAction = tail.currentAction
     a.outputTokens = tail.outputTokens
     a.model = tail.model
+    a.promptPreview = await readTranscriptPrompt(a.transcriptPath)
     if (!a.startedAt && tail.firstTimestamp) a.startedAt = tail.firstTimestamp  // window start ≈ start; hook data is preferred
   }
 
@@ -565,11 +567,32 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
       currentAction: a.currentAction,
       outputTokens: a.outputTokens,
       model: a.model ?? null,
+      promptPreview: a.promptPreview ?? null,
       transcriptPath: a.transcriptPath,
     }
   })
 
   return { runId, found, phases, workflowName, agents: rows, script: undefined }
+}
+
+// The agent's goal: its task prompt is the FIRST line of its transcript
+// (type:user). Read only the head of the file — transcripts grow large.
+export async function readTranscriptPrompt(filePath, { maxBytes = 8192, maxChars = 300 } = {}) {
+  if (!filePath) return null
+  let fh = null
+  try {
+    fh = await fs.open(filePath, 'r')
+    const buf = Buffer.alloc(maxBytes)
+    const { bytesRead } = await fh.read(buf, 0, maxBytes, 0)
+    const firstLine = buf.subarray(0, bytesRead).toString('utf8').split('\n')[0]
+    const line = JSON.parse(firstLine)
+    if (line?.type !== 'user') return null
+    const c = line.message?.content
+    let text = null
+    if (typeof c === 'string') text = c
+    else if (Array.isArray(c)) text = c.find(b => b?.type === 'text' && typeof b.text === 'string')?.text ?? null
+    return text ? text.trim().slice(0, maxChars) : null
+  } catch { return null } finally { if (fh) await fh.close().catch(() => {}) }
 }
 
 // Mirrors the CLI's `s` (save) semantics: project scope writes to the nearest

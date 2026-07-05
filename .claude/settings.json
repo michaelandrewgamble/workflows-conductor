@@ -4,7 +4,10 @@
       "Bash(cursor --help)",
       "Read(//Users/michaelgamble/Library/Application Support/Cursor/User/**)",
       "Bash(awk 'NR>=255 && NR<=285' server/reader.test.js)",
-      "Bash(osascript -e 'tell application \"Cursor\" to activate' -e 'delay 0.3' -e 'tell application \"System Events\" to key code 2 using {control down, option down}')"
+      "Bash(osascript -e 'tell application \"Cursor\" to activate' -e 'delay 0.3' -e 'tell application \"System Events\" to key code 2 using {control down, option down}')",
+      "Bash(CONDUCTOR_TOKEN=x9 CONDUCTOR_PORT=7439 CONDUCTOR_DATA_DIR=/private/tmp/claude-501/-Users-michaelgamble-GitHub-workflows-conductor/72a10b37-1f38-488b-a25f-95f1c1298654/scratchpad/dd node server/dashboard.js)",
+      "Bash(curl -s \"http://127.0.0.1:7439/api/agents/wf_961a5b09-2bc?t=x9\")",
+      "Bash(kill %1)"
     ],
     "additionalDirectories": [
       "/Users/michaelgamble/Library/Application Support/Cursor/User"
