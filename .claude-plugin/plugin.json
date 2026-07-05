@@ -2,13 +2,20 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "conductor",
   "displayName": "Workflows Conductor",
-  "description": "Manage Claude Code dynamic workflow runs from the VS Code/Cursor extension: list, inspect, save, and re-run — the /workflows and Desktop tasks-pane experience for surfaces that lack it.",
-  "version": "0.9.9",
+  "description": "Manage Claude Code dynamic workflow runs from the VS Code/Cursor extension: list, inspect, save, and re-run \u2014 the /workflows and Desktop tasks-pane experience for surfaces that lack it.",
+  "version": "1.0.0",
   "author": {
     "name": "Michael Gamble",
     "email": "michaelandrewgamble@gmail.com"
   },
-  "repository": "https://github.com/michaelgamble/workflows-conductor",
+  "repository": "https://github.com/michaelandrewgamble/workflows-conductor",
   "license": "MIT",
-  "keywords": ["workflows", "ultracode", "orchestration", "monitoring", "subagents"]
+  "keywords": [
+    "workflows",
+    "ultracode",
+    "orchestration",
+    "monitoring",
+    "subagents"
+  ],
+  "homepage": "https://github.com/michaelandrewgamble/workflows-conductor"
 }
