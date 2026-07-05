@@ -101,6 +101,29 @@ async function liveState() {
   return liveCache
 }
 
+// ── IDE theme: follow Cursor/VS Code's workbench.colorTheme so the page
+// feels native to the editor rather than keying off OS dark mode ──
+const IDE_SETTINGS = [
+  ['cursor', path.join(os.homedir(), 'Library', 'Application Support', 'Cursor', 'User', 'settings.json')],
+  ['vscode', path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User', 'settings.json')],
+]
+async function ideTheme() {
+  for (const [source, f] of IDE_SETTINGS) {
+    try {
+      const raw = await fs.readFile(f, 'utf8')
+      const m = raw.match(/"workbench\.colorTheme"\s*:\s*"([^"]+)"/)
+      const theme = m ? m[1] : null
+      // Name heuristic: most themes are dark unless they say otherwise.
+      const mode = theme && /light|latte|dawn|daylight|quiet light|solarized light/i.test(theme) ? 'light' : 'dark'
+      return { theme, mode, source }
+    } catch { /* try next IDE */ }
+  }
+  return { theme: null, mode: null, source: null }
+}
+for (const [, f] of IDE_SETTINGS) {
+  try { watch(f, () => broadcast('theme')) } catch { /* absent IDE */ }
+}
+
 // ── watcher: one recursive watch on the projects root + rescan fallback ──
 function broadcast(type) {
   for (const res of sseClients) res.write(`event: ${type}\ndata: ${Date.now()}\n\n`)
@@ -156,6 +179,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, { ...runs, hookLive })
     }
     if (url.pathname === '/api/live') return json(res, await liveState())
+    if (url.pathname === '/api/theme') return json(res, await ideTheme())
     if (url.pathname.startsWith('/api/tail/')) {
       // No client-supplied paths: runId+agentId only; the transcript path is
       // resolved by the reader inside ~/.claude/projects by construction.
@@ -189,7 +213,9 @@ const PAGE = /* html */ `<!doctype html><html><head><meta charset="utf-8"><title
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--line:#e5e7eb;--card:#f9fafb;--acc:#4f46e5;--ok:#059669;--bad:#dc2626;--warn:#d97706}
-@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e5e7eb;--mut:#9ca3af;--line:#252a33;--card:#171b22;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}}
+@media(prefers-color-scheme:dark){:root{--bg:#1e1e1e;--fg:#e5e7eb;--mut:#9ca3af;--line:#333842;--card:#252526;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}}
+:root[data-theme=light]{--bg:#fff;--fg:#1a1a1a;--mut:#6b7280;--line:#e5e7eb;--card:#f9fafb;--acc:#4f46e5;--ok:#059669;--bad:#dc2626;--warn:#d97706}
+:root[data-theme=dark]{--bg:#1e1e1e;--fg:#e5e7eb;--mut:#9ca3af;--line:#333842;--card:#252526;--acc:#818cf8;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-sans-serif,system-ui;background:var(--bg);color:var(--fg)}
 header{display:flex;gap:12px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 h1{font-size:16px;margin:0}#totals{color:var(--mut)}
@@ -224,15 +250,17 @@ tr.sub .act{color:var(--mut);font-size:11px}
 .tev .tool{color:var(--acc)}.tev .badge{display:block}
 .badge{font-size:11px;color:var(--mut)}
 .xp{cursor:pointer;color:var(--mut);display:inline-block;width:14px}
-.info{cursor:pointer;color:var(--mut);margin-left:6px;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:0 5px;display:inline-block;line-height:1.4}
-.info:hover{color:var(--fg);border-color:var(--acc)}
+button.info{cursor:pointer;color:var(--mut);background:transparent;border:0;padding:2px;margin-right:6px;border-radius:5px;display:inline-flex;align-items:center;vertical-align:-3px;opacity:.55}
+tr.run:hover button.info{opacity:1}
+button.info:hover{color:var(--acc);background:var(--card);opacity:1}
+#themec{cursor:pointer;background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:inherit;font-size:12px}
 .goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word}
 .goal b{color:var(--mut);font-size:11px;text-transform:uppercase;margin-right:6px}
 #sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 #sf button{background:var(--bg);color:var(--mut);border:0;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
 #sf button.on{background:var(--card);color:var(--fg)}
 </style></head><body>
-<header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><span id="sf"><button data-f="all" class="on">all</button><button data-f="active">active</button><button data-f="done">finished</button></span><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><span id="dot" title="SSE"></span></header>
+<header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><span id="sf"><button data-f="all" class="on">all</button><button data-f="active">active</button><button data-f="done">finished</button></span><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><button id="themec" title="theme source"></button><span id="dot" title="SSE"></span></header>
 <main><section><table><thead><tr id="hdr"></tr></thead><tbody id="rows"></tbody></table></section></main>
 <aside id="detail"><button id="close" title="close (Esc)">✕</button><div id="dbody"></div></aside>
 <script>
@@ -243,6 +271,19 @@ const fmt=n=>n==null?'—':n.toLocaleString()
 const dur=ms=>ms==null?'—':ms<60000?(ms/1000).toFixed(1)+'s':Math.round(ms/60000)+'m'
 const when=ts=>ts?new Date(ts).toLocaleString():'—'
 const shortProj=p=>{const s=String(p||'').split('-').filter(Boolean);return s.length?s.slice(-2).join('-'):'(no project)'}
+const INFO_BTN='<button class="info" title="run summary"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="7.2" y="6.8" width="1.6" height="4.6" rx=".8" fill="currentColor"/><circle cx="8" cy="4.6" r="1" fill="currentColor"/></svg></button>'
+// ── theme: follow the IDE (Cursor/VS Code) by default, manual override cycles ──
+let themePref=localStorage.getItem('themePref')||'ide'   // ide | light | dark
+async function applyTheme(){
+  const root=document.documentElement,btn=document.getElementById('themec')
+  if(themePref==='ide'){
+    try{
+      const t=await q('/api/theme')
+      if(t.mode){root.dataset.theme=t.mode;btn.textContent='theme: '+t.source+' ('+t.mode+')';btn.title=t.theme||'';return}
+    }catch{}
+    delete root.dataset.theme;btn.textContent='theme: os'
+  }else{root.dataset.theme=themePref;btn.textContent='theme: '+themePref}
+}
 // UI state lives here at module level; refresh() only swaps data and re-renders,
 // so sort/filter/grouping/collapsed/selection all survive SSE-triggered refreshes.
 let sel=null,sortKey='timestamp',sortDir=-1,filter='',statusFilter='all',groupOn=true,data=null
@@ -293,7 +334,7 @@ function rowHtml(r){
   const cls=r.isLive?(r.status.startsWith('stale')?'stale':'live'):(r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk'))
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
   const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
-  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+esc(r.runId)+(r.noPick?'':'<span class="info" title="run summary">i</span>')+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+(r.noPick?'':INFO_BTN)+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
   // Agent sub-rows use the SAME columns as runs. Live rows always show them;
   // finished rows expand on demand (agents fetched lazily into agentsCache).
   if(r.isLive)for(const a of r.agents)html+=subRowHtml(r.runId,a,drift)
@@ -470,17 +511,22 @@ document.getElementById('hdr').addEventListener('click',e=>{
 })
 document.getElementById('filter').addEventListener('input',e=>{filter=e.target.value;render()})
 document.getElementById('grp').addEventListener('change',e=>{groupOn=e.target.checked;render()})
+document.getElementById('themec').addEventListener('click',()=>{
+  themePref=themePref==='ide'?'light':themePref==='light'?'dark':'ide'
+  localStorage.setItem('themePref',themePref);applyTheme()
+})
 document.getElementById('close').addEventListener('click',closeDrawer)
 addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()})
 const es=new EventSource('/events?t='+T)
 es.onopen=()=>document.getElementById('dot').classList.add('live')
 es.onerror=()=>document.getElementById('dot').classList.remove('live')
 es.addEventListener('change',()=>{refresh();refreshLive()})
+es.addEventListener('theme',()=>{if(themePref==='ide')applyTheme()})
 es.addEventListener('tick',()=>{refresh();refreshLive(true)})
 // fast poll while anything is live; 1s in-place tick keeps timers moving
 setInterval(()=>{if(live&&Array.isArray(live.active)&&(live.active.length+(live.unattributed||[]).length))refreshLive()},5000)
 setInterval(tickLive,1000)
-refresh();refreshLive(true)
+refresh();refreshLive(true);applyTheme()
 </script></body></html>`
 
 // A concurrent instance may already hold the port: exit quietly WITHOUT
