@@ -46,7 +46,10 @@
       "Bash(curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:7437/)",
       "Bash(curl -s -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:9225/json)",
       "Bash(sed -i '' 's/\"version\": \"1.1.0\"/\"version\": \"1.2.0\"/' .claude-plugin/plugin.json)",
-      "Bash(sed -i '' \"s/const VERSION = '1.1.0'/const VERSION = '1.2.0'/\" server/dashboard.js)"
+      "Bash(sed -i '' \"s/const VERSION = '1.1.0'/const VERSION = '1.2.0'/\" server/dashboard.js)",
+      "Bash(curl -s http://127.0.0.1:7423/api/agents/wf_1ef7b744-09d?t=__CMDSUB_OUTPUT__)",
+      "Bash(grep -o \"subRowHtml\\(runId,a,drift\\){.\\\\{0,400\\\\}\")",
+      "Bash(node --input-type=module -e ' *)"
     ],
     "additionalDirectories": [
       "/Users/michaelgamble/Library/Application Support/Cursor/User"
