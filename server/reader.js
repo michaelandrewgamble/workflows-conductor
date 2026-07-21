@@ -256,6 +256,32 @@ async function findRecordFor(runId, projectsDir) {
   return null
 }
 
+const SECTION_CAP = 4000
+
+// Readable projection of a record's result for panel rendering: one section
+// per top-level key (string values pass through, everything else is
+// pretty-stringified), each tidy()-redacted and capped. [] on anything weird.
+function resultSectionsOf(result) {
+  try {
+    const section = (key, value) => {
+      let text
+      if (typeof value === 'string') text = value
+      else {
+        try { text = JSON.stringify(value, null, 1) } catch { text = String(value) }
+        if (typeof text !== 'string') text = String(value)   // stringify(undefined) etc.
+      }
+      text = tidy(text)
+      const truncated = text.length > SECTION_CAP
+      return { key, text: truncated ? text.slice(0, SECTION_CAP) : text, truncated }
+    }
+    if (typeof result === 'string') return [section(null, result)]
+    if (typeof result === 'object' && result !== null && !Array.isArray(result)) {
+      return Object.keys(result).map(k => section(k, result[k]))
+    }
+    return []                                                // missing or non-plain: nothing to render
+  } catch { return [] }
+}
+
 export async function getRun(runId, { projectsDir = DEFAULT_PROJECTS_DIR, now = Date.now() } = {}) {
   const file = await findRecordFor(runId, projectsDir)
   if (!file) return { found: false, runId, reason: 'no run record on disk (expired, never finished, or wrong id)' }
@@ -270,6 +296,7 @@ export async function getRun(runId, { projectsDir = DEFAULT_PROJECTS_DIR, now = 
     phases: parsed.value.phases ?? null,
     resultPreview: resultStr === null ? null : resultStr.slice(0, 2000),
     resultTruncated: resultStr !== null && resultStr.length > 2000,
+    resultSections: resultSectionsOf(result),
   }
 }
 
@@ -528,7 +555,7 @@ export function deriveTitle(label, prompt) {
     if (!s) return null
     // Leading boilerplate carries no identity — drop it (a couple of passes
     // handles stacked prefixes like "Step by step, you are ...").
-    const boilerplate = /^(?:step by step[,:.\s]+|you are\s+|do (?:these|the following) steps[,:.\s]*|please\s+)/i
+    const boilerplate = /^(?:step by step[,:.\s]+|you are\s+|you own exactly.*?\.\s+|you own\s+|you may.*?\.\s+|read .*?\bfirst\.\s+|context:\s*|do (?:these|the following) steps[,:.\s]*|please\s+)/i
     for (let i = 0; i < 3 && boilerplate.test(s); i++) s = s.replace(boilerplate, '')
     // Absolute and ~ paths collapse to their basename.
     s = s.replace(/(?:~|\/)[^\s`'"()[\]{}]*\/+([^\s`'"()[\]{}/]+)/g, '$1')
@@ -615,6 +642,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
   // 4. Phases from the run's script (source never returned).
   const src = await getScript(runId, { projectsDir })
   const phases = src.found ? parsePhases(src.script) : []
+  const labelPairs = src.found ? parseAgentLabels(src.script) : []
   const workflowName = src.found ? (src.script.match(/name:\s*['"]([^'"]+)['"]/)?.[1] ?? null) : null
 
   const rows = [...agents.values()].map(a => {
@@ -633,7 +661,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
       outputTokens: a.outputTokens,
       model: a.model ?? null,
       promptPreview: a.promptPreview ?? null,
-      title: deriveTitle(null, a.promptPreview ?? null),    // labels don't exist live
+      title: matchLabel(labelPairs, a.promptPreview) ?? deriveTitle(null, a.promptPreview ?? null),    // labels don't exist live
       stats: a.stats ?? null,
       transcriptPath: a.transcriptPath,
     }
@@ -644,6 +672,43 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
     description: src.found ? parseMetaDescription(src.script) : null,
     agents: rows, script: undefined,
   }
+}
+
+// Author labels exist in the script from run start — only the label→agentId
+// mapping is missing until the terminal record. Recover it live: extract
+// (promptPrefix, label) pairs from agent(...) calls and prefix-match against
+// each agent's transcript prompt.
+export function parseAgentLabels(scriptSource) {
+  const pairs = []
+  if (typeof scriptSource !== 'string') return pairs
+  const norm = (t) => tidy(t).replace(/\\`/g, '`').replace(/\s+/g, ' ').trim()
+  const re = /label\s*:\s*['"]([^'"]+)['"]/g
+  let m
+  while ((m = re.exec(scriptSource))) {
+    const callStart = scriptSource.lastIndexOf('agent(', m.index)
+    if (callStart === -1) continue
+    const after = scriptSource.slice(callStart + 6, callStart + 6 + 400)
+    const qm = after.match(/^[\s(]*([`'"])/)
+    if (!qm) continue
+    let body = after.slice(after.indexOf(qm[1]) + 1)
+    const dollar = qm[1] === '`' ? body.indexOf('${') : -1
+    if (dollar !== -1) body = body.slice(0, dollar)
+    const endq = body.indexOf(qm[1])
+    if (endq !== -1) body = body.slice(0, endq)
+    const prefix = norm(body).slice(0, 80)
+    if (prefix.length >= 25) pairs.push({ prefix, label: m[1] })
+  }
+  return pairs
+}
+
+export function matchLabel(pairs, promptPreview) {
+  if (!pairs?.length || typeof promptPreview !== 'string') return null
+  const p = promptPreview.replace(/\s+/g, ' ').trim()
+  for (const { prefix, label } of pairs) {
+    const probe = prefix.slice(0, Math.min(prefix.length, 60))
+    if (probe.length >= 25 && p.startsWith(probe)) return label
+  }
+  return null
 }
 
 // The agent's goal: its task prompt is the FIRST line of its transcript

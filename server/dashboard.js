@@ -9,7 +9,7 @@ import { promises as fs, watch } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
-import { listRuns, getRun, getAgents, getLiveAgents, parseTranscriptTail, readTranscriptPrompt, deriveTitle, DEFAULT_PROJECTS_DIR } from './reader.js'
+import { listRuns, getRun, getAgents, getLiveAgents, getScript, parseMetaDescription, parseTranscriptTail, readTranscriptPrompt, deriveTitle, DEFAULT_PROJECTS_DIR } from './reader.js'
 
 const PORT = Number(process.env.CONDUCTOR_PORT || 7423)
 const TOKEN = process.env.CONDUCTOR_TOKEN
@@ -17,7 +17,7 @@ const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.cla
 const IDLE_LIMIT_MS = 30 * 60 * 1000
 const HOOK_CLAIM_TTL_MS = 10 * 60 * 1000
 const JUST_FINISHED_MS = 5 * 60 * 1000
-const VERSION = '1.1.0'
+const VERSION = '1.2.0'
 
 if (!TOKEN) { console.error('CONDUCTOR_TOKEN required'); process.exit(2) }
 
@@ -140,7 +140,7 @@ function summarizeViaCli(prompt) {
     // appends a second "let me…" sentence.
     child.on('close', code => {
       const line = out.split('\n').map(s => s.trim()).find(Boolean) ?? ''
-      return (code === 0 && line) ? settle(resolve, line.slice(0, 300)) : settle(reject, new Error('exit ' + code))
+      return (code === 0 && line) ? settle(resolve, line.slice(0, 600)) : settle(reject, new Error('exit ' + code))
     })
   })
 }
@@ -149,25 +149,85 @@ function enqueueSummary(runId, agentId) {
   const key = runId + '/' + agentId
   if (summaries[key] || summaryInFlight.has(key) || summaryFailed.has(key)) return
   summaryInFlight.add(key)
-  summaryQueue.push({ runId, agentId, key })
+  summaryQueue.push({ kind: 'agent', runId, agentId, key })
   pumpSummaries()
 }
+// Run-level summaries share the queue/cache. Keys: run:<runId>:plan|result.
+// Plan is immutable, so plan summaries may be built for live runs; result
+// summaries require a terminal record (the route gates on that).
+function enqueueRunSummary(runId, kind) {
+  const key = 'run:' + runId + ':' + kind
+  if (summaries[key] || summaryInFlight.has(key) || summaryFailed.has(key)) return
+  summaryInFlight.add(key)
+  summaryQueue.push({ kind: 'run-' + kind, runId, key })
+  pumpSummaries()
+}
+
+// Input assembly for the run-plan summary: meta description + phase titles +
+// up to 8 agents as "title: first 200 chars of prompt", capped ~2500 chars.
+async function runPlanPrompt(runId) {
+  const run = await getRun(runId)
+  let description = null, phases = [], agents = []
+  if (run.found) {
+    try { const s = await getScript(runId); if (s.found) description = parseMetaDescription(s.script) } catch { /* script gone */ }
+    if (Array.isArray(run.phases)) phases = run.phases
+    try { agents = (await getAgents(runId)).agents } catch { /* journal gone */ }
+  } else {
+    const detail = await getLiveAgents(runId, { dataDir: DATA_DIR })
+    description = detail.description ?? null
+    phases = detail.phases ?? []
+    agents = detail.agents ?? []
+  }
+  const parts = []
+  if (description) parts.push('Description: ' + description)
+  const titles = phases.map(p => typeof p === 'string' ? p : p?.title).filter(Boolean)
+  if (titles.length) parts.push('Phases: ' + titles.join('; '))
+  for (const a of agents.slice(0, 8)) {
+    const name = a.title ?? a.label ?? a.agentId
+    const pv = String(a.promptPreview ?? '').slice(0, 200)
+    parts.push(pv ? name + ': ' + pv : String(name))
+  }
+  const input = tidy(parts.join('\n')).slice(0, 2500)
+  if (!input.trim()) throw new Error('no plan data')
+  return 'In 1-2 plain sentences, present tense, no preamble: what is this multi-agent workflow doing and how is the work divided?\n\n' + input
+}
+
+// Input assembly for the run-result summary: record summary + resultSections
+// texts (fallback: resultPreview), capped ~3000 chars.
+async function runResultPrompt(runId) {
+  const run = await getRun(runId)
+  if (!run.found) throw new Error('no record')
+  const parts = []
+  if (run.summary) parts.push('Goal: ' + run.summary)
+  const secs = Array.isArray(run.resultSections) ? run.resultSections : []
+  for (const s of secs) if (s && s.text) parts.push((s.key ? s.key + ': ' : '') + s.text)
+  if (!secs.length && run.resultPreview) parts.push(run.resultPreview)
+  const input = tidy(parts.join('\n')).slice(0, 3000)
+  if (!input.trim()) throw new Error('no result data')
+  return 'In 2-3 plain sentences, past tense, no preamble: what did this workflow conclude or produce?\n\n' + input
+}
+
+async function buildSummaryPrompt({ kind, runId, agentId }) {
+  if (kind === 'run-plan') return runPlanPrompt(runId)
+  if (kind === 'run-result') return runResultPrompt(runId)
+  const ag = await getAgents(runId)
+  const agent = ag.agents.find(a => a.agentId === agentId)
+  const goal = agent ? ((agent.transcriptPath ? await readTranscriptPrompt(agent.transcriptPath) : null) ?? agent.promptPreview ?? null) : null
+  if (!goal) throw new Error('no goal text')
+  return 'In one plain-language sentence (max 25 words), present tense, say what this agent is doing. No preamble. Task: ' + tidy(goal).slice(0, 2000)
+}
+
 // concurrency 1: at most one claude process at a time
 async function pumpSummaries() {
   if (summaryPumping) return
   summaryPumping = true
   while (summaryQueue.length) {
-    const { runId, agentId, key } = summaryQueue.shift()
+    const item = summaryQueue.shift()
     try {
-      const ag = await getAgents(runId)
-      const agent = ag.agents.find(a => a.agentId === agentId)
-      const goal = agent ? ((agent.transcriptPath ? await readTranscriptPrompt(agent.transcriptPath) : null) ?? agent.promptPreview ?? null) : null
-      if (!goal) throw new Error('no goal text')
-      const prompt = 'In one plain-language sentence (max 25 words), present tense, say what this agent is doing. No preamble. Task: ' + tidy(goal).slice(0, 2000)
-      summaries[key] = await summarizeViaCli(prompt)
+      summaries[item.key] = await summarizeViaCli(await buildSummaryPrompt(item))
       await persistSummaries()
-    } catch { summaryFailed.add(key) }   // never crash the server; log nothing (goals may hold secrets)
-    summaryInFlight.delete(key)
+    } catch { summaryFailed.add(item.key) }   // never crash the server; log nothing (goals may hold secrets)
+    summaryInFlight.delete(item.key)
   }
   summaryPumping = false
 }
@@ -276,7 +336,30 @@ const server = http.createServer(async (req, res) => {
       enqueueSummary(runId, agentId)
       return json(res, { state: 'pending' })
     }
-    if (url.pathname.startsWith('/api/run/')) return json(res, await getRun(url.pathname.split('/')[3]))
+    if (url.pathname.startsWith('/api/runsummary/')) {
+      // Same id discipline; kind is a strict whitelist.
+      const [, , , runId, kind] = url.pathname.split('/')
+      if (!/^wf_[A-Za-z0-9-]+$/.test(runId ?? '') || (kind !== 'plan' && kind !== 'result')) {
+        return json(res, { error: 'bad runId/kind' }, 400)
+      }
+      const key = 'run:' + runId + ':' + kind
+      if (summaries[key]) return json(res, { state: 'ready', summary: summaries[key] })
+      if (summaryFailed.has(key)) return json(res, { state: 'error' })
+      // Result summaries only exist once a terminal record does; not an error —
+      // the run may simply still be in flight.
+      if (kind === 'result' && !(await getRun(runId)).found) return json(res, { state: 'unavailable' })
+      enqueueRunSummary(runId, kind)
+      return json(res, { state: 'pending' })
+    }
+    if (url.pathname.startsWith('/api/run/')) {
+      const run = await getRun(url.pathname.split('/')[3])
+      // Augment with the workflow's meta description (the record itself only
+      // carries the goal summary) — the run panel's plan block shows it.
+      if (run.found && run.description === undefined) {
+        try { const s = await getScript(run.runId); run.description = s.found ? parseMetaDescription(s.script) : null } catch { run.description = null }
+      }
+      return json(res, run)
+    }
     if (url.pathname.startsWith('/api/agents/')) return json(res, await getAgents(url.pathname.split('/')[3]))
     if (url.pathname === '/shutdown' && req.method === 'POST') { json(res, { bye: true }); return setTimeout(() => process.exit(0), 50) }
     if (url.pathname === '/events') {
@@ -352,6 +435,7 @@ button.info:hover{color:var(--acc);background:var(--card);opacity:1}
 #themec,#aisum{cursor:pointer;background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:inherit;font-size:12px}
 .goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word;max-height:132px;overflow-y:auto;white-space:pre-wrap}
 .goal b{color:var(--mut);font-size:11px;text-transform:uppercase;margin-right:6px}
+.rkey{color:var(--mut);font-size:11px;text-transform:uppercase;font-weight:600;margin:10px 0 2px}
 #sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 #sf button{background:var(--bg);color:var(--mut);border:0;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
 #sf button.on{background:var(--card);color:var(--fg)}
@@ -377,6 +461,35 @@ function setHtml(id,html){const el=document.getElementById(id);if(!el)return fal
 // AI summaries: default on; sumCache holds /api/summary responses per run/agent
 let aiOn=localStorage.getItem('aiSum')!=='off'
 const sumCache=new Map()
+// Pending-summary pollers: while a panel shows a pending summary, poll its
+// endpoint on a dedicated 2.5s loop (cap ~120s -> 'summary unavailable'),
+// independent of live-refresh cycles. Cleared on panel close/switch.
+const sumPolls=new Map() // key -> {timer,started}
+function stopSumPolls(){for(const p of sumPolls.values())clearTimeout(p.timer);sumPolls.clear()}
+function needSum(key){const c=sumCache.get(key);return !c||c.state==='pending'||c.state==='unavailable'}
+function pollSummary(key,url,onDone){
+  if(sumPolls.has(key))return
+  const st={started:Date.now(),timer:null}
+  sumPolls.set(key,st)
+  const poll=async()=>{
+    if(sumPolls.get(key)!==st)return
+    let r=null;try{r=await q(url)}catch{}
+    if(sumPolls.get(key)!==st)return
+    if(r&&r.state)sumCache.set(key,r)
+    if(r&&r.state&&r.state!=='pending'&&r.state!=='unavailable'){sumPolls.delete(key);onDone();return}
+    if(Date.now()-st.started>120000){sumCache.set(key,{state:'timeout'});sumPolls.delete(key);onDone();return}
+    st.timer=setTimeout(poll,2500)
+  }
+  poll()
+}
+// One-line AI summary state -> HTML, shared by agent and run panels.
+function aiLine(key,label){
+  const c=sumCache.get(key)
+  if(c&&c.state==='ready')return '<div><span class="badge">'+label+':</span> '+esc(c.summary)+'</div>'
+  if(c&&(c.state==='error'||c.state==='timeout'))return '<div class="badge">'+label+': summary unavailable</div>'
+  if(c&&c.state==='unavailable')return ''
+  return '<div class="badge">'+label+': …</div>'
+}
 const INFO_BTN='<button class="info" title="run summary"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="7.2" y="6.8" width="1.6" height="4.6" rx=".8" fill="currentColor"/><circle cx="8" cy="4.6" r="1" fill="currentColor"/></svg></button>'
 // ── theme: follow the IDE (Cursor/VS Code) by default, manual override cycles ──
 let themePref=localStorage.getItem('themePref')||'ide'   // ide | light | dark
@@ -559,17 +672,19 @@ async function refreshLive(force){
   }catch{}finally{liveBusy=false}
 }
 // Mechanical status line (instant, from tail data) + AI sentence once ready.
+// Only truthy segments joined with ' · ' — no stray leading/trailing dots when
+// stats or timestamps are missing.
 function sumHtml(t,runId,agentId){
-  const tc=(t.stats&&t.stats.toolCounts)||{}
-  const entries=Object.entries(tc).sort((x,y)=>y[1]-x[1])
-  const total=entries.reduce((s,e)=>s+e[1],0)
-  const top=entries.slice(0,2).map(e=>e[0]).join(', ')
-  const last=t.lastTimestamp?'last active '+ago(Date.now()-new Date(t.lastTimestamp).getTime())+' ago':''
-  const parts=[esc(t.title??t.label??'agent'),total+' tool call'+(total===1?'':'s')+(top?' ('+top+')':''),last].filter(Boolean)
-  let h='<div class="goal"><b>summary</b>'+parts.join(' · ')
-  if(aiOn){const c=sumCache.get(runId+'/'+agentId)
-    if(c&&c.state==='ready')h+='<div><span class="badge">AI summary:</span> '+esc(c.summary)+'</div>'
-    else if(!c||c.state==='pending')h+='<div class="badge">AI summary: …</div>'}
+  const parts=[esc(t.title??t.label??'agent')]
+  if(t.stats&&t.stats.toolCounts){
+    const entries=Object.entries(t.stats.toolCounts).sort((x,y)=>y[1]-x[1])
+    const total=entries.reduce((s,e)=>s+e[1],0)
+    const top=entries.slice(0,2).map(e=>e[0]).join(', ')
+    parts.push(total+' tool call'+(total===1?'':'s')+(top?' ('+top+')':''))
+  }
+  if(t.lastTimestamp)parts.push('last active '+ago(Date.now()-new Date(t.lastTimestamp).getTime())+' ago')
+  let h='<div class="goal"><b>summary</b>'+parts.filter(Boolean).join(' · ')
+  if(aiOn)h+=aiLine(runId+'/'+agentId,'AI summary')
   return h+'</div>'
 }
 async function loadTail(runId,agentId){
@@ -588,11 +703,10 @@ async function loadTail(runId,agentId){
   if(lastHtml.get('dfoot')!=='::split::'){document.getElementById('dfoot').innerHTML='<div id="dsum"></div><div id="dgoal"></div>';lastHtml.set('dfoot','::split::');lastHtml.delete('dsum');lastHtml.delete('dgoal')}
   setHtml('dsum',sumHtml(t,runId,agentId))
   setHtml('dgoal',t.goal?'<div class="goal"><b>goal</b>'+esc(t.goal)+'</div>':'')
-  if(aiOn){const k=runId+'/'+agentId,c=sumCache.get(k)
-    if(!c||c.state==='pending')q('/api/summary/'+encodeURIComponent(runId)+'/'+encodeURIComponent(agentId)).then(r=>{
-      if(r&&r.state)sumCache.set(k,r)
-      if(r&&r.state==='ready'&&selTail&&selTail.runId===runId&&selTail.agentId===agentId)setHtml('dsum',sumHtml(t,runId,agentId))
-    }).catch(()=>{})}
+  if(aiOn){const k=runId+'/'+agentId
+    if(needSum(k))pollSummary(k,'/api/summary/'+encodeURIComponent(runId)+'/'+encodeURIComponent(agentId),()=>{
+      if(selTail&&selTail.runId===runId&&selTail.agentId===agentId)setHtml('dsum',sumHtml(t,runId,agentId))
+    })}
   const body=document.getElementById('dbody')
   const nearBottom=body.scrollHeight-body.scrollTop-body.clientHeight<80
   const hadContent=!!body.querySelector('.tev')
@@ -605,7 +719,7 @@ async function refresh(){
   if(sel)loadDetail(sel)
 }
 function pick(id){
-  selTail=null;sel=id;render()
+  stopSumPolls();selTail=null;sel=id;render()
   document.getElementById('detail').classList.add('open')
   setHtml('dtitle','<h2>'+esc(id)+'</h2>')
   setHtml('dbody','<span class="badge">loading…</span>')
@@ -614,7 +728,7 @@ function pick(id){
   loadDetail(id)
 }
 function pickTail(runId,agentId){
-  sel=null;selTail={runId,agentId};render()
+  stopSumPolls();sel=null;selTail={runId,agentId};render()
   // instant feedback: open with a placeholder before the fetch resolves
   document.getElementById('detail').classList.add('open')
   setHtml('dtitle','<h2>agent <span class="badge">('+esc(shortAg(agentId))+')</span></h2><div class="mut">'+esc(runId)+'</div>')
@@ -622,30 +736,51 @@ function pickTail(runId,agentId){
   setHtml('dfoot','')
   loadTail(runId,agentId)
 }
-function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
-// Run summary panel (ⓘ icon). Agent listing lives in the table sub-rows —
-// not repeated here.
-// In-flight run macro view: phase plan with the current phase inferred, then
-// an agent roster (title (shortid) · state chip · current action).
-function liveDetailHtml(r){
-  const agents=r.agents||[]
-  const drift=Date.now()-liveAt
-  const act=agents.filter(a=>a.state==='running').sort((x,y)=>new Date(y.lastActivityAt||0)-new Date(x.lastActivityAt||0))
-  const curPhase=(act[0]&&act[0].phaseTitle)||null
-  let h='<div class="goal"><b>phase</b>'+esc(curPhase??'phase ?')
-  if(Array.isArray(r.phases)&&r.phases.length)
-    h+=r.phases.map(p=>{const on=curPhase===p.title;return '<div'+(on?' style="color:var(--acc)"':' class="badge"')+'>'+(on?'▶ ':'· ')+esc(p.title)+'</div>'}).join('')
-  h+='</div>'
+function closeDrawer(){if(sel==null&&selTail==null)return;stopSumPolls();sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
+// Run summary panel (ⓘ icon): ONE anatomy for live and finished runs.
+// Body = PLAN block (AI plan line · description · phase list · agent roster),
+// finished runs append a RESULT block (AI result line · labeled sections).
+// Footer stays the goal/description block.
+function rosterHtml(agents,drift,liveMode){
+  if(!agents.length)return '<div class="badge">no agents seen yet</div>'
+  let h=''
   for(const a of agents){
     const b=agentBadge(a,drift)
-    h+='<div class="agent"><span class="'+b.dot+'"></span><b>'+nameCell(a.title??null,shortAg(a.agentId))+'</b> <span class="s '+b.statusCls+'">'+esc(b.statusText)+'</span><span class="mut" style="white-space:nowrap;word-break:normal;overflow:hidden;text-overflow:ellipsis">'+esc(actionText(a.currentAction))+'</span></div>'
+    const tok=a.outputTokens??a.tokens
+    h+='<div class="agent"><span class="'+b.dot+'"></span><b>'+nameCell(a.title??a.label??null,shortAg(a.agentId))+'</b> <span class="s '+b.statusCls+'">'+esc(b.statusText)+'</span>'+
+      (tok!=null?' <span class="badge">'+fmt(tok)+' tok</span>':'')+
+      (liveMode?'<span class="mut" style="white-space:nowrap;word-break:normal;overflow:hidden;text-overflow:ellipsis">'+esc(actionText(a.currentAction))+'</span>':'')+'</div>'
   }
-  if(!agents.length)h+='<div class="badge">no agents seen yet</div>'
+  return h
+}
+function planHtml(runId,desc,phases,agents,drift,liveMode){
+  let h='<div class="goal"><b>plan</b>'
+  if(aiOn)h+=aiLine('run:'+runId+':plan','AI')
+  if(desc)h+='<div>'+esc(desc)+'</div>'
+  const ph=Array.isArray(phases)?phases:[]
+  if(ph.length){
+    const act=(agents||[]).filter(a=>a.state==='running').sort((x,y)=>new Date(y.lastActivityAt||0)-new Date(x.lastActivityAt||0))
+    const cur=liveMode?((act[0]&&act[0].phaseTitle)||null):null
+    h+=ph.map(p=>{const ti=typeof p==='string'?p:(p&&p.title)||'?';const on=liveMode&&cur===ti;return '<div'+(on?' style="color:var(--acc)"':' class="badge"')+'>'+(on?'▶ ':'· ')+esc(ti)+'</div>'}).join('')
+  }
+  h+='</div>'
+  return h+rosterHtml(agents||[],drift,liveMode)
+}
+function resultHtml(run){
+  let h='<div class="goal"><b>result</b>'
+  if(aiOn)h+=aiLine('run:'+run.runId+':result','AI')
+  h+='</div>'
+  const secs=Array.isArray(run.resultSections)?run.resultSections.filter(s=>s&&(s.text||s.key)):[]
+  if(secs.length)for(const s of secs)h+=(s.key?'<div class="rkey">'+esc(s.key)+'</div>':'')+'<pre>'+esc(s.text??'')+(s.truncated?'\\n… (truncated)':'')+'</pre>'
+  else if(run.resultPreview)h+='<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>'
+  else h+='<span class="badge">no result recorded</span>'
   return h
 }
 async function loadDetail(id){
   const run=await q('/api/run/'+encodeURIComponent(id))
   if(sel!==id)return
+  // Plan is immutable, so its summary may be requested even while live.
+  if(aiOn&&needSum('run:'+id+':plan'))pollSummary('run:'+id+':plan','/api/runsummary/'+encodeURIComponent(id)+'/plan',()=>{if(sel===id)loadDetail(id)})
   if(run.found===false){
     // recordless = in flight: render the live macro view from /api/live
     // (cached server-side), not a one-line cop-out
@@ -655,7 +790,7 @@ async function loadDetail(id){
     if(lr){
       const n=(lr.agents||[]).length
       setHtml('dtitle','<h2>'+esc(lr.name??'—')+' <span class="badge">('+esc(shortRun(id))+')</span></h2><div class="mut">in flight · '+n+' agent'+(n===1?'':'s')+'</div>')
-      setHtml('dbody',liveDetailHtml(lr))
+      setHtml('dbody',planHtml(id,lr.description,lr.phases,lr.agents||[],Date.now()-liveAt,true))
       setHtml('dfoot',lr.description?'<div class="goal"><b>goal</b>'+esc(lr.description)+'</div>':'')
     }else{
       setHtml('dtitle','<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet</div>')
@@ -664,9 +799,17 @@ async function loadDetail(id){
     }
     return
   }
-  setHtml('dtitle','<h2>'+esc(run.workflowName??'—')+' <span class="badge">('+esc(shortRun(id))+')</span></h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+' · '+fmt(run.agentCount)+' agents</div>')
+  if(aiOn&&needSum('run:'+id+':result'))pollSummary('run:'+id+':result','/api/runsummary/'+encodeURIComponent(id)+'/result',()=>{if(sel===id)loadDetail(id)})
+  // Roster for finished runs comes from the shared agentsCache (lazy fetch).
+  if(!agentsCache.has(id)){
+    if(agFetching.has(id))setTimeout(()=>{if(sel===id&&!agentsCache.has(id))loadDetail(id)},500)
+    else ensureAgents(id).then(()=>{if(sel===id&&agentsCache.has(id))loadDetail(id)})   // has() guard: a failed fetch must not retry-loop
+  }
+  const meta=[esc(id),esc(run.status),run.totalTokens!=null?fmt(run.totalTokens)+' tokens':'',run.durationMs!=null?dur(run.durationMs):'',run.agentCount!=null?fmt(run.agentCount)+' agents':''].filter(Boolean).join(' · ')
+  setHtml('dtitle','<h2>'+esc(run.workflowName??'—')+' <span class="badge">('+esc(shortRun(id))+')</span></h2><div class="mut">'+meta+'</div>')
   setHtml('dbody',(run.error?'<div class="goal"><b>error</b>'+esc(run.error)+'</div>':'')+
-    (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'<span class="badge">no result recorded</span>'))
+    planHtml(id,run.description,run.phases,agentsCache.get(id)||[],0,false)+
+    resultHtml(run))
   setHtml('dfoot',run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':'')
 }
 // pointerdown, not click: fires before any re-render can replace the target.
@@ -710,7 +853,9 @@ const aiBtn=document.getElementById('aisum')
 function aiLbl(){aiBtn.textContent='AI summaries: '+(aiOn?'on':'off')}
 aiBtn.addEventListener('click',()=>{
   aiOn=!aiOn;localStorage.setItem('aiSum',aiOn?'on':'off');aiLbl()
+  if(!aiOn)stopSumPolls()
   if(selTail)loadTail(selTail.runId,selTail.agentId)
+  if(sel)loadDetail(sel)
 })
 aiLbl()
 document.getElementById('close').addEventListener('click',closeDrawer)

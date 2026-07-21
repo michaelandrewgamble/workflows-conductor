@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd, parseTranscriptTail, parsePhases, parseMetaDescription, deriveTitle, getLiveAgents } from './reader.js'
+import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd, parseTranscriptTail, parsePhases, parseMetaDescription, deriveTitle, parseAgentLabels, matchLabel, getLiveAgents } from './reader.js'
 
 let root, projectsDir, cwdA, cwdB
 const now = Date.now()
@@ -88,7 +88,22 @@ before(async () => {
   await write(path.join(okDir, 'agent-agent1.jsonl'), '{}\n')
   await write(path.join(okDir, 'agent-agent2.jsonl'), '{}\n')
 
-  // 10. Empty project (zero runs).
+  // 10. Result-shape fixtures for getRun's resultSections projection:
+  // object with markdown string, non-string value, oversized string, home path.
+  await write(path.join(sessA, 'workflows', 'wf_sections.json'), JSON.stringify(record({
+    runId: 'wf_sections', timestamp: new Date(now - 5000).toISOString(),
+    result: {
+      diagnosis: '## Heading\ntext',
+      list: [1, 2],
+      big: 'x'.repeat(5000),
+      home: path.join(os.homedir(), 'secret.txt'),
+    },
+  })))
+  await write(path.join(sessA, 'workflows', 'wf_strres.json'), JSON.stringify(record({
+    runId: 'wf_strres', timestamp: new Date(now - 6000).toISOString(), result: 'plain string result',
+  })))
+
+  // 11. Empty project (zero runs).
   await fs.mkdir(path.join(projectsDir, encodeCwd(path.join(root, 'repos', 'empty')), 'session-1'), { recursive: true })
 })
 
@@ -171,6 +186,31 @@ test('getRun projects metadata: no script field, result previewed', async () => 
   assert.ok(run.resultPreview.includes('done'))
   const missing = await getRun('wf_nope', { projectsDir })
   assert.equal(missing.found, false)
+})
+
+test('getRun resultSections: keyed sections for object results, string passthrough vs stringified, cap, tidy', async () => {
+  // Object result → one section per top-level key.
+  const ok = await getRun('wf_ok1', { projectsDir, now })
+  assert.deepEqual(ok.resultSections, [{ key: 'done', text: 'true', truncated: false }])
+  assert.ok(ok.resultPreview.includes('done'))               // resultPreview untouched
+
+  const sec = await getRun('wf_sections', { projectsDir, now })
+  const byKey = Object.fromEntries(sec.resultSections.map(s => [s.key, s]))
+  assert.equal(byKey.diagnosis.text, '## Heading\ntext')     // string values pass through verbatim
+  assert.equal(byKey.diagnosis.truncated, false)
+  assert.equal(byKey.list.text, JSON.stringify([1, 2], null, 1))   // non-strings pretty-stringified
+  assert.equal(byKey.big.text.length, 4000)                  // capped
+  assert.equal(byKey.big.truncated, true)
+  assert.ok(byKey.home.text.includes('~'))                   // tidy: home dir redacted
+  assert.ok(!byKey.home.text.includes(os.homedir()))
+
+  // String result → single keyless section.
+  const str = await getRun('wf_strres', { projectsDir, now })
+  assert.deepEqual(str.resultSections, [{ key: null, text: 'plain string result', truncated: false }])
+
+  // Missing result → [].
+  const deg = await getRun('wf_degraded', { projectsDir, now })
+  assert.deepEqual(deg.resultSections, [])
 })
 
 test('getAgents prefers record workflow_agent entries, merges journal + transcript paths, drops torn lines', async () => {
@@ -418,4 +458,19 @@ test('saveAsWorkflow: user scope writes to ~/.claude/workflows; invalid names re
 
   const missing = await saveAsWorkflow('wf_nope', 'x-flow', { projectsDir, cwd: cwdA })
   assert.equal(missing.saved, false)
+})
+
+test('parseAgentLabels + matchLabel recover author labels from script text', () => {
+  const script = "phase('B')\nconst r = await parallel([\n  () => agent(`You own EXACTLY server/dashboard.js in /x — do not touch it. Read it fully first. ${'x'}`, { label: 'dashboard-macro-panel', phase: 'B' }),\n  () => agent('Count the lines in every file and report totals per directory now.', { label: 'line-counter' }),\n])"
+  const pairs = parseAgentLabels(script)
+  assert.equal(pairs.length, 2)
+  assert.equal(matchLabel(pairs, 'You own EXACTLY server/dashboard.js in /x — do not touch it. Read it fully…'), 'dashboard-macro-panel')
+  assert.equal(matchLabel(pairs, 'Count the lines in every file and report totals per directory now.'), 'line-counter')
+  assert.equal(matchLabel(pairs, 'Entirely unrelated prompt that matches nothing at all in the script text'), null)
+})
+
+test('deriveTitle strips ownership boilerplate', () => {
+  const t = deriveTitle(null, 'You own EXACTLY server/reader.js in the repo. Add resultSections to getRun for panel rendering.')
+  assert.ok(t && !/^you own/i.test(t), t)
+  assert.ok(/resultSections|Add/i.test(t), t)
 })
