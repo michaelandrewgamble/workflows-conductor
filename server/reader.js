@@ -26,6 +26,8 @@ export function encodeCwd(cwd) {
 // username) in goals, tool summaries, or snippets — ~ reads better anyway.
 const HOME = os.homedir()
 function tidy(s) { return typeof s === 'string' ? s.split(HOME).join('~') : s }
+// runId/agentId → matched author label; labels are immutable, cache forever.
+const labelMatchCache = new Map()
 
 async function safeReaddir(dir) {
   try { return await fs.readdir(dir, { withFileTypes: true }) } catch { return [] }
@@ -661,12 +663,28 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
       outputTokens: a.outputTokens,
       model: a.model ?? null,
       promptPreview: a.promptPreview ?? null,
-      title: matchLabel(labelPairs, a.promptPreview) ?? deriveTitle(null, a.promptPreview ?? null),    // labels don't exist live
+      title: null,                 // resolved below (deep-read label match, cached)
+      titleSource: 'label',
       stats: a.stats ?? null,
       transcriptPath: a.transcriptPath,
     }
   })
 
+  for (const r of rows) {
+    if (!r.title && labelPairs.length && r.transcriptPath) {
+      const ck = runId + '/' + r.agentId
+      if (labelMatchCache.has(ck)) r.title = labelMatchCache.get(ck)
+      else {
+        // task-specific text can sit far past the display window (huge
+        // shared preambles) — deep-read just for matching, then cache forever
+        const deep = await readTranscriptPrompt(r.transcriptPath, { maxBytes: 262144, maxChars: 60000 })
+        r.title = matchLabel(labelPairs, deep)
+        if (r.title) labelMatchCache.set(ck, r.title)
+      }
+    }
+    if (!r.title) { r.title = deriveTitle(null, r.promptPreview ?? null); r.titleSource = 'derived' }
+  }
+  disambiguateTitles(rows)
   return {
     runId, found, phases, workflowName,
     description: src.found ? parseMetaDescription(src.script) : null,
@@ -681,22 +699,24 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
 export function parseAgentLabels(scriptSource) {
   const pairs = []
   if (typeof scriptSource !== 'string') return pairs
-  const norm = (t) => tidy(t).replace(/\\`/g, '`').replace(/\s+/g, ' ').trim()
+  const norm = (t) => tidy(t).replace(/\\`/g, '`').replace(/\\n/g, ' ').replace(/\s+/g, ' ').trim()
   const re = /label\s*:\s*['"]([^'"]+)['"]/g
   let m
   while ((m = re.exec(scriptSource))) {
     const callStart = scriptSource.lastIndexOf('agent(', m.index)
     if (callStart === -1) continue
-    const after = scriptSource.slice(callStart + 6, callStart + 6 + 400)
-    const qm = after.match(/^[\s(]*([`'"])/)
-    if (!qm) continue
-    let body = after.slice(after.indexOf(qm[1]) + 1)
-    const dollar = qm[1] === '`' ? body.indexOf('${') : -1
-    if (dollar !== -1) body = body.slice(0, dollar)
-    const endq = body.indexOf(qm[1])
-    if (endq !== -1) body = body.slice(0, endq)
-    const prefix = norm(body).slice(0, 80)
-    if (prefix.length >= 25) pairs.push({ prefix, label: m[1] })
+    // The prompt region is everything between agent( and this label:.
+    // Templates may START with ${...} (shared CONTEXT vars), so prefix-only
+    // matching fails — collect every static chunk between interpolations and
+    // keep the longest as a fingerprint findable ANYWHERE in the prompt.
+    const region = scriptSource.slice(callStart + 6, m.index)
+    const chunks = region.split(/\$\{[^}]*\}/)
+    let best = ''
+    for (const c of chunks) {
+      const t = norm(c.replace(/^[\s(]*[`'"]/, '').replace(/[`'"][\s\S]*$/, ''))
+      if (t.length > best.length) best = t
+    }
+    if (best.length >= 25) pairs.push({ fragment: best.slice(0, 120), label: m[1] })
   }
   return pairs
 }
@@ -704,11 +724,40 @@ export function parseAgentLabels(scriptSource) {
 export function matchLabel(pairs, promptPreview) {
   if (!pairs?.length || typeof promptPreview !== 'string') return null
   const p = promptPreview.replace(/\s+/g, ' ').trim()
-  for (const { prefix, label } of pairs) {
-    const probe = prefix.slice(0, Math.min(prefix.length, 60))
-    if (probe.length >= 25 && p.startsWith(probe)) return label
+  for (const { fragment, label } of pairs) {
+    const probe = fragment.slice(0, Math.min(fragment.length, 60))
+    if (probe.length >= 25 && p.includes(probe)) return label
   }
   return null
+}
+
+// When fallback-derived titles collide within a run (shared prompt preamble),
+// re-derive each from the point where its prompt DIVERGES from the others.
+export function disambiguateTitles(agents) {
+  try {
+    const fallbacks = agents.filter(a => a && a.titleSource === 'derived' && typeof a.promptPreview === 'string')
+    if (fallbacks.length < 2) return
+    const titles = fallbacks.map(a => a.title).filter(Boolean)
+    if (new Set(titles).size === titles.length) return
+    const prompts = fallbacks.map(a => a.promptPreview)
+    let cp = prompts[0] ?? ''
+    for (const pr of prompts) { let i = 0; while (i < cp.length && i < pr.length && cp[i] === pr[i]) i++; cp = cp.slice(0, i) }
+    const cut = Math.max(0, cp.lastIndexOf(' '))
+    if (cut < 20) return
+    const proposed = fallbacks.map(a => {
+      // the divergence can land mid-word; skip the partial token
+      let tail = a.promptPreview.slice(cut).trim()
+      const sp = tail.search(/\s/)
+      if (sp > 0 && sp < 20 && !/^[A-Z][a-z]/.test(tail)) tail = tail.slice(sp).trim()
+      return deriveTitle(null, tail)
+    })
+    // quality gate: only adopt if the results are real words and distinct;
+    // otherwise keep the shared base title with honest #n suffixes
+    const good = proposed.every(t => t && t.length >= 12) && new Set(proposed).size === proposed.length
+    fallbacks.forEach((a, i) => {
+      a.title = good ? proposed[i] : (a.title ? a.title + ' #' + (i + 1) : null)
+    })
+  } catch { /* titles are cosmetic — never break the listing */ }
 }
 
 // The agent's goal: its task prompt is the FIRST line of its transcript

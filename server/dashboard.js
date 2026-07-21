@@ -17,7 +17,7 @@ const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.cla
 const IDLE_LIMIT_MS = 30 * 60 * 1000
 const HOOK_CLAIM_TTL_MS = 10 * 60 * 1000
 const JUST_FINISHED_MS = 5 * 60 * 1000
-const VERSION = '1.2.0'
+const VERSION = '1.2.1'
 
 if (!TOKEN) { console.error('CONDUCTOR_TOKEN required'); process.exit(2) }
 
