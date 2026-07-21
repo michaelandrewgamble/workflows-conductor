@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd, parseTranscriptTail, parsePhases, getLiveAgents } from './reader.js'
+import { listRuns, getRun, getAgents, getScript, saveAsWorkflow, encodeCwd, parseTranscriptTail, parsePhases, parseMetaDescription, deriveTitle, getLiveAgents } from './reader.js'
 
 let root, projectsDir, cwdA, cwdB
 const now = Date.now()
@@ -178,10 +178,12 @@ test('getAgents prefers record workflow_agent entries, merges journal + transcri
   const a1 = res.agents.find(a => a.agentId === 'agent1')
   assert.equal(a1.state, 'done')                            // from record
   assert.equal(a1.tokens, 500)
+  assert.equal(a1.title, 'worker')                          // label wins over prompt
   assert.ok(a1.transcriptPath.endsWith('agent-agent1.jsonl'))
   const a2 = res.agents.find(a => a.agentId === 'agent2')   // journal-only: started, never finished
   assert.equal(a2.started, true)
   assert.notEqual(a2.finished, true)
+  assert.equal(a2.title, undefined)                         // title is a record-sourced field
 
   const live = await getAgents('wf_live', { projectsDir })
   assert.ok(live.notes.some(n => n.includes('torn')))
@@ -234,6 +236,14 @@ function asstLine(ts, content, outputTokens) {
   })
 }
 
+function userPromptLine(ts, text) {
+  return JSON.stringify({
+    parentUuid: null, isSidechain: true, agentId: 'aX', type: 'user',
+    message: { role: 'user', content: text },
+    timestamp: ts,
+  })
+}
+
 function toolResultLine(ts) {
   return JSON.stringify({
     parentUuid: 'p', isSidechain: true, agentId: 'aX', type: 'user',
@@ -265,13 +275,15 @@ test('parseTranscriptTail: tool/text/result events, token sum, torn trailing lin
   assert.equal(res.currentAction.kind, 'tool')
   assert.equal(res.currentAction.tool, 'Bash')
   assert.match(res.currentAction.summary, /ls -la/)
+  assert.deepEqual(res.stats, { events: 3, toolCounts: { Bash: 1 } })
 
   const capped = await parseTranscriptTail(f, { maxEvents: 1 })
   assert.equal(capped.events.length, 1)
   assert.equal(capped.events[0].kind, 'tool')                // most recent survives the cap
+  assert.equal(capped.stats.events, 3)                       // stats count the window, not the cap
 
   const missing = await parseTranscriptTail(path.join(root, 'tail', 'nope.jsonl'))
-  assert.deepEqual(missing, { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null, model: null })
+  assert.deepEqual(missing, { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null, model: null, stats: { events: 0, toolCounts: {} } })
 })
 
 test('parseTranscriptTail: mid-file window drops the leading partial line and still parses', async () => {
@@ -282,6 +294,37 @@ test('parseTranscriptTail: mid-file window drops the leading partial line and st
   assert.equal(res.firstTimestamp, T2)                       // earliest seen in window, not true file start
   assert.equal(res.outputTokens, 25)                         // line 1 usage outside the window
   assert.equal(res.currentAction.tool, 'Bash')
+  assert.deepEqual(res.stats, { events: 2, toolCounts: { Bash: 1 } })
+})
+
+test('deriveTitle: label wins; prompt distilled; garbage → null', () => {
+  assert.equal(deriveTitle('worker-3', 'anything at all'), 'worker-3')
+  assert.equal(deriveTitle('  ', 'Fix the build. Then stop.'), 'Fix the build')   // blank label falls through
+  assert.equal(
+    deriveTitle(null, 'Monorepo: ~/GitHub/x (pnpm). Branch: feat/y. Work in the working tree — do NOT commit'),
+    'Monorepo: x (pnpm)')                                    // first sentence, path → basename
+  assert.equal(
+    deriveTitle(null, '## `Fix` the **flaky** test in /Users/someone/repo/pkg/test.js and report'),
+    'Fix the flaky test in test.js and report')               // markdown stripped, path collapsed
+  assert.equal(
+    deriveTitle(null, 'You are a meticulous release auditor. Check every tag.'),
+    'a meticulous release auditor')                           // boilerplate prefix dropped
+  const long = deriveTitle(null, 'Refactor the authentication middleware layer to support rotating tokens')
+  assert.ok(long.endsWith('…') && long.length <= 42, `bad truncation: ${JSON.stringify(long)}`)
+  assert.ok(long.startsWith('Refactor the authentication'))
+  assert.equal(deriveTitle(null, null), null)
+  assert.equal(deriveTitle(undefined, 42), null)
+  assert.equal(deriveTitle(null, '   '), null)
+  assert.equal(deriveTitle(null, '```\n***\n###'), null)      // pure markdown noise
+})
+
+test('parseMetaDescription: tolerant extraction; null when absent or garbage', () => {
+  assert.equal(parseMetaDescription(
+    "export const meta = {\n  name: 'x',\n  description: 'checks the build, then reports',\n  phases: [{ title: 'P' }],\n}"),
+    'checks the build, then reports')
+  assert.equal(parseMetaDescription("export const meta = { name: 'x' }"), null)
+  assert.equal(parseMetaDescription('utter {{{ garbage'), null)
+  assert.equal(parseMetaDescription(null), null)
 })
 
 test('parsePhases: realistic meta block; garbage and phase-less meta yield []', () => {
@@ -304,7 +347,7 @@ test('getLiveAgents: journal state + hook startedAt + transcript tail merge', as
 
   await write(path.join(sess, 'workflows', 'wf_liveX.json'), JSON.stringify(record({
     runId: 'wf_liveX', status: 'running',
-    script: "export const meta = { name: 'live-wf', phases: [{ title: 'Plan' }, { title: 'Build', detail: 'do it' }] }\nreturn 1",
+    script: "export const meta = { name: 'live-wf', description: 'exercise the live merge', phases: [{ title: 'Plan' }, { title: 'Build', detail: 'do it' }] }\nreturn 1",
   })))
   await write(path.join(runDir, 'journal.jsonl'),
     '{"type":"started","key":"v2:k1","agentId":"agentD"}\n' +
@@ -313,6 +356,7 @@ test('getLiveAgents: journal state + hook startedAt + transcript tail merge', as
   await write(path.join(runDir, 'agent-agentD.jsonl'),
     asstLine(isoAgo(120000), [{ type: 'text', text: 'done summary' }], 40) + '\n')
   await write(path.join(runDir, 'agent-agentR.jsonl'),
+    userPromptLine(isoAgo(46000), 'Monorepo: ~/GitHub/x (pnpm). Branch: feat/y. Work in the working tree — do NOT commit') + '\n' +
     asstLine(isoAgo(45000), [{ type: 'text', text: 'working on it' }], 12) + '\n' +
     asstLine(isoAgo(2000), [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }], 30) + '\n')
   const oldD = new Date(tNow - 120000)
@@ -328,6 +372,7 @@ test('getLiveAgents: journal state + hook startedAt + transcript tail merge', as
   assert.equal(res.found, true)
   assert.equal(res.script, undefined)                        // phases only, never source
   assert.deepEqual(res.phases, [{ title: 'Plan' }, { title: 'Build', detail: 'do it' }])
+  assert.equal(res.description, 'exercise the live merge')   // meta.description, not source
   assert.equal(res.agents.length, 2)                         // agentZ's uncorrelated Start excluded
 
   const d = res.agents.find(a => a.agentId === 'agentD')
@@ -342,17 +387,23 @@ test('getLiveAgents: journal state + hook startedAt + transcript tail merge', as
   assert.equal(r.currentAction.tool, 'Bash')
   assert.match(r.currentAction.summary, /npm test/)
   assert.equal(r.outputTokens, 42)
+  assert.ok(r.promptPreview.startsWith('Monorepo:'))
+  assert.equal(r.title, 'Monorepo: x (pnpm)')                // derived live — no labels exist
+  assert.deepEqual(r.stats, { events: 2, toolCounts: { Bash: 1 } })   // prompt line is not an event
   assert.ok(r.transcriptPath.endsWith('agent-agentR.jsonl'))
 
   assert.equal(d.startedAt, isoAgo(120000))                  // fallback: transcript first timestamp
   assert.equal(d.quietMs, null)                              // quiet is a running-agent concept
   assert.equal(d.isFresh, false)                             // mtime 2 min old
   assert.equal(d.outputTokens, 40)
+  assert.equal(d.title, null)                                // no user prompt line → nothing to derive
+  assert.deepEqual(d.stats, { events: 1, toolCounts: {} })
 
   const missing = await getLiveAgents('wf_nope', { projectsDir: pdir, dataDir, now: tNow })
   assert.equal(missing.found, false)
   assert.deepEqual(missing.agents, [])
   assert.deepEqual(missing.phases, [])
+  assert.equal(missing.description, null)
 })
 
 test('saveAsWorkflow: user scope writes to ~/.claude/workflows; invalid names rejected', async () => {

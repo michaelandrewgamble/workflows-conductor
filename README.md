@@ -34,7 +34,7 @@ Because it reads the disk rather than any one session, Conductor sees runs start
 
 ## Features
 
-- **Live agent observability** — active runs float to the top of a unified table with per-agent sub-rows: state with pulse/stalled detection, elapsed time, live token burn, and the model each agent is *actually* running (read from its transcript, not its config). Click an agent for a chat-style panel: pinned identity header, streaming activity feed that follows the newest event, and the agent's full goal pinned as the footer.
+- **Live agent observability** — active runs float to the top of a unified table with per-agent sub-rows: state with pulse/stalled detection, elapsed time, live token burn, and the model each agent is *actually* running (read from its transcript, not its config). Click an agent for a chat-style panel: pinned identity header, streaming activity feed that follows the newest event, and the agent's full goal pinned as the footer beneath an instant status line — plus an optional **one-sentence AI summary** of what the agent is doing (generated once via your existing Claude auth on Haiku, cached forever, header-toggleable).
 - **Cross-project, cross-surface history** — every run from every project and every surface in one sortable, filterable, project-grouped table, with expandable per-agent detail (tokens, model, duration) for finished runs too.
 - **Save & re-run** — extract any run's orchestration script (even a killed run's — it's inlined in the run record) into a reusable `/name` slash command, or relaunch it fresh with `/conductor:rerun`.
 - **IDE-native** — follows your Cursor/VS Code color theme live (it watches `settings.json`, not the OS), opens inside the IDE's Simple Browser via a one-keystroke bridge, and the dashboard URL/token stay stable across restarts and upgrades so a pinned tab keeps working forever.
@@ -129,7 +129,7 @@ Agent transcripts can contain secrets, so the dashboard is treated as sensitive:
 
 ## Token cost
 
-Passive overhead is ~200 tokens per session (the skill descriptions). Everything continuous — dashboard, file watching, hooks — runs entirely off-model: **watching your workflows costs zero tokens**. You pay only when you invoke a skill, and projections keep those calls in the hundreds of tokens. In practice Conductor is token-negative: every dashboard glance replaces a "what's running?" model turn.
+Passive overhead is ~200 tokens per session (the skill descriptions). Everything continuous — dashboard, file watching, hooks — runs entirely off-model: **watching your workflows costs zero tokens**, with one deliberate, toggleable exception: AI agent summaries (on by default) spend roughly one Haiku sentence per agent panel you open, once ever (cached permanently). Turn them off in the dashboard header for strict zero. You pay only when you invoke a skill, and projections keep those calls in the hundreds of tokens. In practice Conductor is token-negative: every dashboard glance replaces a "what's running?" model turn.
 
 ## Requirements & compatibility
 

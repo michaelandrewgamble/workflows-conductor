@@ -8,7 +8,8 @@ import http from 'node:http'
 import { promises as fs, watch } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { listRuns, getRun, getAgents, getLiveAgents, parseTranscriptTail, readTranscriptPrompt, DEFAULT_PROJECTS_DIR } from './reader.js'
+import { spawn } from 'node:child_process'
+import { listRuns, getRun, getAgents, getLiveAgents, parseTranscriptTail, readTranscriptPrompt, deriveTitle, DEFAULT_PROJECTS_DIR } from './reader.js'
 
 const PORT = Number(process.env.CONDUCTOR_PORT || 7423)
 const TOKEN = process.env.CONDUCTOR_TOKEN
@@ -16,7 +17,7 @@ const DATA_DIR = process.env.CONDUCTOR_DATA_DIR || path.join(os.homedir(), '.cla
 const IDLE_LIMIT_MS = 30 * 60 * 1000
 const HOOK_CLAIM_TTL_MS = 10 * 60 * 1000
 const JUST_FINISHED_MS = 5 * 60 * 1000
-const VERSION = '0.7.0'
+const VERSION = '1.1.0'
 
 if (!TOKEN) { console.error('CONDUCTOR_TOKEN required'); process.exit(2) }
 
@@ -80,6 +81,7 @@ async function liveState() {
     active.push({
       runId, source,
       name: hook?.name ?? rec?.workflowName ?? detail.workflowName ?? null,
+      description: detail.description ?? null,
       projectDir: cand?.projectDir ?? null,
       lastActivity: cand?.lastActivity ?? null,
       resumedAfter: cand?.resumedAfter ?? null,
@@ -99,6 +101,75 @@ async function liveState() {
   liveCache = { active, justFinished, unattributed, generatedAt: now }
   liveCacheAt = now
   return liveCache
+}
+
+// ── AI summaries: one-sentence Haiku summaries of agent goals via the user's
+// `claude` CLI (subscription auth — no API key handled here). Goals are
+// immutable, so the cache (DATA_DIR/summaries.json) never expires. ──
+const SUMMARIES_FILE = path.join(DATA_DIR, 'summaries.json')
+const HOME = os.homedir()
+const tidy = s => typeof s === 'string' ? s.split(HOME).join('~') : s
+let summaries = {}
+async function loadSummaries() {
+  try { const v = JSON.parse(await fs.readFile(SUMMARIES_FILE, 'utf8')); if (v && typeof v === 'object' && !Array.isArray(v)) summaries = v } catch { /* first run */ }
+}
+async function persistSummaries() {
+  try { await fs.writeFile(SUMMARIES_FILE, JSON.stringify(summaries), { mode: 0o600 }) } catch { /* non-fatal */ }
+}
+const summaryQueue = []
+const summaryInFlight = new Set()   // queued or running — dedupes repeat polls
+const summaryFailed = new Set()     // errored keys: reported as error, not retried this process
+let summaryPumping = false
+
+function summarizeViaCli(prompt) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const settle = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v) } }
+    let child
+    try {
+      // --setting-sources '': without it the CLI loads the user's settings,
+      // plugins and MCP servers — measured to hang past 30s. --disallowed-tools:
+      // the goal text embeds an agent task; the summarizer must never act on it.
+      child = spawn('claude', ['-p', prompt, '--model', 'haiku', '--setting-sources', '', '--disallowed-tools', '*'], { cwd: os.homedir(), stdio: ['ignore', 'pipe', 'ignore'] })
+    } catch (err) { return reject(err) }
+    const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } settle(reject, new Error('timeout')) }, 30_000)
+    let out = ''
+    child.stdout.on('data', d => { if (out.length < 4096) out += d })
+    child.on('error', err => settle(reject, err))   // e.g. ENOENT — claude binary missing
+    // First non-empty line only: despite "No preamble" the model sometimes
+    // appends a second "let me…" sentence.
+    child.on('close', code => {
+      const line = out.split('\n').map(s => s.trim()).find(Boolean) ?? ''
+      return (code === 0 && line) ? settle(resolve, line.slice(0, 300)) : settle(reject, new Error('exit ' + code))
+    })
+  })
+}
+
+function enqueueSummary(runId, agentId) {
+  const key = runId + '/' + agentId
+  if (summaries[key] || summaryInFlight.has(key) || summaryFailed.has(key)) return
+  summaryInFlight.add(key)
+  summaryQueue.push({ runId, agentId, key })
+  pumpSummaries()
+}
+// concurrency 1: at most one claude process at a time
+async function pumpSummaries() {
+  if (summaryPumping) return
+  summaryPumping = true
+  while (summaryQueue.length) {
+    const { runId, agentId, key } = summaryQueue.shift()
+    try {
+      const ag = await getAgents(runId)
+      const agent = ag.agents.find(a => a.agentId === agentId)
+      const goal = agent ? ((agent.transcriptPath ? await readTranscriptPrompt(agent.transcriptPath) : null) ?? agent.promptPreview ?? null) : null
+      if (!goal) throw new Error('no goal text')
+      const prompt = 'In one plain-language sentence (max 25 words), present tense, say what this agent is doing. No preamble. Task: ' + tidy(goal).slice(0, 2000)
+      summaries[key] = await summarizeViaCli(prompt)
+      await persistSummaries()
+    } catch { summaryFailed.add(key) }   // never crash the server; log nothing (goals may hold secrets)
+    summaryInFlight.delete(key)
+  }
+  summaryPumping = false
 }
 
 // ── IDE theme: follow Cursor/VS Code's workbench.colorTheme so the page
@@ -191,7 +262,19 @@ const server = http.createServer(async (req, res) => {
       const agent = ag.agents.find(a => a.agentId === agentId)
       if (!agent?.transcriptPath) return json(res, { error: 'no transcript for that agent' }, 404)
       const goal = (await readTranscriptPrompt(agent.transcriptPath)) ?? agent.promptPreview
-      return json(res, { runId, agentId, goal, label: agent.label ?? null, ...(await parseTranscriptTail(agent.transcriptPath)) })
+      return json(res, { runId, agentId, goal, label: agent.label ?? null, title: agent.title ?? deriveTitle(agent.label ?? null, goal ?? null), ...(await parseTranscriptTail(agent.transcriptPath)) })
+    }
+    if (url.pathname.startsWith('/api/summary/')) {
+      // Same id discipline as /api/tail — never a client-supplied path.
+      const [, , , runId, agentId] = url.pathname.split('/')
+      if (!/^wf_[A-Za-z0-9-]+$/.test(runId ?? '') || !/^[A-Za-z0-9]+$/.test(agentId ?? '')) {
+        return json(res, { error: 'bad runId/agentId' }, 400)
+      }
+      const key = runId + '/' + agentId
+      if (summaries[key]) return json(res, { state: 'ready', summary: summaries[key] })
+      if (summaryFailed.has(key)) return json(res, { state: 'error' })
+      enqueueSummary(runId, agentId)
+      return json(res, { state: 'pending' })
     }
     if (url.pathname.startsWith('/api/run/')) return json(res, await getRun(url.pathname.split('/')[3]))
     if (url.pathname.startsWith('/api/agents/')) return json(res, await getAgents(url.pathname.split('/')[3]))
@@ -266,14 +349,14 @@ section::-webkit-scrollbar-track,#dbody::-webkit-scrollbar-track,pre::-webkit-sc
 button.info{cursor:pointer;color:var(--mut);background:transparent;border:0;padding:2px;margin-right:6px;border-radius:5px;display:inline-flex;align-items:center;vertical-align:-3px;opacity:.55}
 tr.run:hover button.info{opacity:1}
 button.info:hover{color:var(--acc);background:var(--card);opacity:1}
-#themec{cursor:pointer;background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:inherit;font-size:12px}
+#themec,#aisum{cursor:pointer;background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:4px 10px;font:inherit;font-size:12px}
 .goal{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:12px;word-break:break-word;max-height:132px;overflow-y:auto;white-space:pre-wrap}
 .goal b{color:var(--mut);font-size:11px;text-transform:uppercase;margin-right:6px}
 #sf{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 #sf button{background:var(--bg);color:var(--mut);border:0;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer}
 #sf button.on{background:var(--card);color:var(--fg)}
 </style></head><body>
-<header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><span id="sf"><button data-f="all" class="on">all</button><button data-f="active">active</button><button data-f="done">finished</button></span><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><button id="themec" title="theme source"></button><span id="dot" title="SSE"></span></header>
+<header><h1>Workflows Conductor</h1><span id="totals"></span><input id="filter" type="search" placeholder="filter runs…" autocomplete="off"><span id="sf"><button data-f="all" class="on">all</button><button data-f="active">active</button><button data-f="done">finished</button></span><label class="tog"><input type="checkbox" id="grp" checked>group by project</label><button id="aisum" title="one-line Haiku summaries in the agent panel (uses your claude CLI)"></button><button id="themec" title="theme source"></button><span id="dot" title="SSE"></span></header>
 <main><section><table><thead><tr id="hdr"></tr></thead><tbody id="rows"></tbody></table></section></main>
 <aside id="detail"><div id="dhead"><div id="dtitle"></div><button id="close" title="close (Esc)">✕</button></div><div id="dbody"></div><div id="dfoot"></div></aside>
 <script>
@@ -284,6 +367,16 @@ const fmt=n=>n==null?'—':n.toLocaleString()
 const dur=ms=>ms==null?'—':ms<60000?(ms/1000).toFixed(1)+'s':Math.round(ms/60000)+'m'
 const when=ts=>ts?new Date(ts).toLocaleString():'—'
 const shortProj=p=>{const s=String(p||'').split('-').filter(Boolean);return s.length?s.slice(-2).join('-'):'(no project)'}
+const shortRun=id=>String(id).replace(/^wf_/,'').slice(0,8)
+const shortAg=id=>String(id).slice(0,8)
+const nameCell=(name,idShort)=>(name?esc(name)+' ':'')+'<span class="badge">('+esc(idShort)+')</span>'
+// ── write-on-change panel regions: identical HTML is never rewritten, so a
+// static goal is written once per agent and its scroll can never reset ──
+const lastHtml=new Map()
+function setHtml(id,html){const el=document.getElementById(id);if(!el)return false;if(lastHtml.get(id)===html)return false;el.innerHTML=html;lastHtml.set(id,html);return true}
+// AI summaries: default on; sumCache holds /api/summary responses per run/agent
+let aiOn=localStorage.getItem('aiSum')!=='off'
+const sumCache=new Map()
 const INFO_BTN='<button class="info" title="run summary"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="7.2" y="6.8" width="1.6" height="4.6" rx=".8" fill="currentColor"/><circle cx="8" cy="4.6" r="1" fill="currentColor"/></svg></button>'
 // ── theme: follow the IDE (Cursor/VS Code) by default, manual override cycles ──
 let themePref=localStorage.getItem('themePref')||'ide'   // ide | light | dark
@@ -308,10 +401,16 @@ async function ensureAgents(runId){
   try{const r=await q('/api/agents/'+encodeURIComponent(runId));if(Array.isArray(r.agents))agentsCache.set(runId,r.agents)}catch{}
   agFetching.delete(runId);render()
 }
-const COLS=[['runId','run'],['workflowName','name'],['status','status'],['agentCount','agents'],['totalTokens','tokens'],['durationMs','dur'],['defaultModel','model'],['timestamp','when'],['projectDir','project']]
+const COLS=[['name','name'],['status','status'],['agentCount','agents'],['totalTokens','tokens'],['durationMs','dur'],['defaultModel','model'],['timestamp','when'],['projectDir','project']]
 const shortModel=m=>m?String(m).replace(/^claude-/,''):''
 const NUM=new Set(['agentCount','totalTokens','durationMs'])
 function cmp(a,b){
+  if(sortKey==='name'){ // merged column: workflowName first, runId breaks ties
+    const wx=String(a.workflowName??'').toLowerCase(),wy=String(b.workflowName??'').toLowerCase()
+    if(wx!==wy)return (wx<wy?-1:1)*sortDir
+    const rx=String(a.runId),ry=String(b.runId)
+    return (rx<ry?-1:rx>ry?1:0)*sortDir
+  }
   let x=a[sortKey],y=b[sortKey]
   if(sortKey==='timestamp'){x=new Date(x??0).getTime()||0;y=new Date(y??0).getTime()||0;return (x-y)*sortDir}
   if(NUM.has(sortKey)){x=x==null?-Infinity:+x;y=y==null?-Infinity:+y;return (x-y)*sortDir}
@@ -347,14 +446,14 @@ function rowHtml(r){
   const cls=r.isLive?(r.status.startsWith('stale')?'stale':'live'):(r.status==='completed'?'completed':(r.statusRecognized?'killed':'unk'))
   const warn=r.compat!=='ok'?' <span class="badge">⚠ '+esc(r.compat)+'</span>':''
   const durCell=r.isLive?'<td class="ldur" data-base="'+(r.durationMs??0)+'">'+(r.durationMs!=null?ago(r.durationMs+drift):'—')+'</td>':'<td>'+dur(r.durationMs)+'</td>'
-  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+(r.noPick?'':INFO_BTN)+esc(r.runId)+'</td><td>'+esc(r.workflowName??'—')+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
+  let html='<tr class="run'+(sel===r.runId?' sel':'')+(r.isLive?' lrun':'')+'" data-id="'+esc(r.runId)+'"'+(r.noPick?' data-nopick="1"':'')+'><td>'+(r.isLive?'<span class="pdot on"></span>':(r.agentCount?'<span class="xp">'+(expanded.has(r.runId)?'▾':'▸')+'</span>':''))+(r.noPick?'':INFO_BTN)+nameCell(r.workflowName??'—',shortRun(r.runId))+warn+'</td><td><span class="s '+cls+'">'+esc(r.status)+'</span></td><td>'+fmt(r.agentCount)+'</td><td>'+fmt(r.totalTokens)+'</td>'+durCell+'<td class="badge">'+esc(shortModel(r.defaultModel))+'</td><td>'+when(r.timestamp)+'</td><td class="badge">'+esc(r.projectDir??'')+'</td></tr>'
   // Agent sub-rows use the SAME columns as runs. Live rows always show them;
   // finished rows expand on demand (agents fetched lazily into agentsCache).
   if(r.isLive)for(const a of r.agents)html+=subRowHtml(r.runId,a,drift)
   else if(expanded.has(r.runId)){
     const ags=agentsCache.get(r.runId)
     if(ags)for(const a of ags)html+=subRowHtml(r.runId,a,0)
-    else html+='<tr class="sub"><td colspan=9 class="badge">loading agents…</td></tr>'
+    else html+='<tr class="sub"><td colspan=8 class="badge">loading agents…</td></tr>'
   }
   return html
 }
@@ -363,8 +462,7 @@ function subRowHtml(runId,a,drift){
   const tok=a.outputTokens??a.tokens
   const durMs=a.elapsedMs??a.durationMs
   return '<tr class="sub" data-run="'+esc(runId)+'" data-agent="'+esc(a.agentId)+'">'+
-    '<td><span class="'+b.dot+'"></span>'+esc(a.agentId.slice(0,10))+'</td>'+
-    '<td class="badge">'+esc(a.label??'')+'</td>'+
+    '<td><span class="'+b.dot+'"></span>'+nameCell(a.title??a.label??null,shortAg(a.agentId))+'</td>'+
     '<td><span class="s '+b.statusCls+' ast">'+esc(b.statusText)+'</span></td>'+
     '<td></td>'+
     '<td>'+(tok!=null?fmt(tok):'')+'</td>'+
@@ -384,7 +482,12 @@ function render(){
   const f=filter.trim().toLowerCase()
   const runs=[...lv,...recorded]
     .filter(r=>statusFilter==='all'||(statusFilter==='active')===(!!r.isLive))
-    .filter(r=>!f||[r.runId,r.workflowName,r.status,r.projectDir].some(v=>String(v??'').toLowerCase().includes(f)))
+    .filter(r=>{ // matches full runId/name AND any agent's full id/title/label
+      if(!f)return true
+      if([r.runId,r.workflowName,r.status,r.projectDir].some(v=>String(v??'').toLowerCase().includes(f)))return true
+      const ags=r.isLive?(r.agents||[]):(agentsCache.get(r.runId)||[])
+      return ags.some(a=>[a.agentId,a.title,a.label].some(v=>String(v??'').toLowerCase().includes(f)))
+    })
     .sort(cmp)
   let html=''
   if(groupOn){
@@ -392,12 +495,12 @@ function render(){
     for(const r of runs){const k=r.projectDir??'';(groups.get(k)??groups.set(k,[]).get(k)).push(r)}
     for(const [k,rs] of groups){
       const open=!collapsed.has(k)||rs.some(r=>r.isLive)   // never hide a live run behind a collapsed group
-      html+='<tr class="grp" data-gk="'+esc(k)+'"><td colspan=9>'+(open?'▾ ':'▸ ')+esc(shortProj(k))+' <span class="badge">('+rs.length+' run'+(rs.length===1?'':'s')+')</span></td></tr>'
+      html+='<tr class="grp" data-gk="'+esc(k)+'"><td colspan=8>'+(open?'▾ ':'▸ ')+esc(shortProj(k))+' <span class="badge">('+rs.length+' run'+(rs.length===1?'':'s')+')</span></td></tr>'
       if(open)html+=rs.map(rowHtml).join('')
     }
   }else html=runs.map(rowHtml).join('')
   const emptyMsg=statusFilter==='active'?'No active runs right now':(((data&&data.runs)||[]).length?'No runs match the filter':'No workflow runs found — launch one with an ultracode: prompt (CLI ≥ 2.1.154)')
-  document.getElementById('rows').innerHTML=html||'<tr><td colspan=9 class="badge">'+emptyMsg+'</td></tr>'
+  document.getElementById('rows').innerHTML=html||'<tr><td colspan=8 class="badge">'+emptyMsg+'</td></tr>'
 }
 // ── Active Runs (F2/F4): fed by /api/live, elapsed ticks locally between polls ──
 let live=null,liveAt=0,selTail=null
@@ -417,7 +520,7 @@ function agentBadge(a,drift){
   const elapsed=a.elapsedMs==null?null:a.elapsedMs+(running?drift:0)
   return {
     dot:stalled?'pdot stall':(fresh?'pdot on':'pdot'),
-    statusText:unknown?'unknown':(running?(stalled?'quiet '+ago(quiet)+' — stalled?':'running'):'done'),
+    statusText:unknown?'unknown':(running?(stalled?'quiet '+ago(quiet)+(quiet>600000?' — stalled or killed?':' — stalled?'):'running'):'done'),
     statusCls:unknown?'unk':(running?(stalled?'stale':'live'):'completed'),
     elapsed,running,
   }
@@ -452,7 +555,22 @@ async function refreshLive(force){
     if(d&&Array.isArray(d.active)){live=d;liveAt=Date.now()}
     render()
     if(selTail)loadTail(selTail.runId,selTail.agentId)
+    if(sel)loadDetail(sel)   // keeps the in-flight macro panel current
   }catch{}finally{liveBusy=false}
+}
+// Mechanical status line (instant, from tail data) + AI sentence once ready.
+function sumHtml(t,runId,agentId){
+  const tc=(t.stats&&t.stats.toolCounts)||{}
+  const entries=Object.entries(tc).sort((x,y)=>y[1]-x[1])
+  const total=entries.reduce((s,e)=>s+e[1],0)
+  const top=entries.slice(0,2).map(e=>e[0]).join(', ')
+  const last=t.lastTimestamp?'last active '+ago(Date.now()-new Date(t.lastTimestamp).getTime())+' ago':''
+  const parts=[esc(t.title??t.label??'agent'),total+' tool call'+(total===1?'':'s')+(top?' ('+top+')':''),last].filter(Boolean)
+  let h='<div class="goal"><b>summary</b>'+parts.join(' · ')
+  if(aiOn){const c=sumCache.get(runId+'/'+agentId)
+    if(c&&c.state==='ready')h+='<div><span class="badge">AI summary:</span> '+esc(c.summary)+'</div>'
+    else if(!c||c.state==='pending')h+='<div class="badge">AI summary: …</div>'}
+  return h+'</div>'
 }
 async function loadTail(runId,agentId){
   const t=await q('/api/tail/'+encodeURIComponent(runId)+'/'+encodeURIComponent(agentId))
@@ -462,14 +580,24 @@ async function loadTail(runId,agentId){
     if(e.kind==='text')return '<div class="tev">'+esc(e.snippet??'')+'</div>'
     return '<div class="tev badge">↳ tool result</div>'
   }).join('')
-  document.getElementById('dtitle').innerHTML='<h2>'+esc(t.label??('agent '+agentId.slice(0,10)+'…'))+'</h2><div class="mut">'+esc(runId)+' · '+esc(agentId.slice(0,10))+'…'+
-    (t.model?' · '+esc(String(t.model).replace(/^claude-/,'')):'')+(t.outputTokens?' · '+fmt(t.outputTokens)+' output tok (window)':'')+'</div>'
-  document.getElementById('dfoot').innerHTML=t.goal?'<div class="goal"><b>goal</b>'+esc(t.goal)+'</div>':''
+  setHtml('dtitle','<h2>'+esc(t.title??t.label??'agent')+' <span class="badge">('+esc(shortAg(agentId))+')</span></h2><div class="mut">'+esc(runId)+' · '+esc(agentId.slice(0,10))+'…'+
+    (t.model?' · '+esc(String(t.model).replace(/^claude-/,'')):'')+(t.outputTokens?' · '+fmt(t.outputTokens)+' output tok (window)':'')+'</div>')
+  // dfoot splits into two independently-tracked regions: the summary line may
+  // tick every refresh, but the goal block below it is written once per agent
+  // so its scroll position survives feed refreshes.
+  if(lastHtml.get('dfoot')!=='::split::'){document.getElementById('dfoot').innerHTML='<div id="dsum"></div><div id="dgoal"></div>';lastHtml.set('dfoot','::split::');lastHtml.delete('dsum');lastHtml.delete('dgoal')}
+  setHtml('dsum',sumHtml(t,runId,agentId))
+  setHtml('dgoal',t.goal?'<div class="goal"><b>goal</b>'+esc(t.goal)+'</div>':'')
+  if(aiOn){const k=runId+'/'+agentId,c=sumCache.get(k)
+    if(!c||c.state==='pending')q('/api/summary/'+encodeURIComponent(runId)+'/'+encodeURIComponent(agentId)).then(r=>{
+      if(r&&r.state)sumCache.set(k,r)
+      if(r&&r.state==='ready'&&selTail&&selTail.runId===runId&&selTail.agentId===agentId)setHtml('dsum',sumHtml(t,runId,agentId))
+    }).catch(()=>{})}
   const body=document.getElementById('dbody')
   const nearBottom=body.scrollHeight-body.scrollTop-body.clientHeight<80
   const hadContent=!!body.querySelector('.tev')
-  body.innerHTML=evs||'<span class="badge">no parsed events in the tail window yet</span>'
-  if(!hadContent||nearBottom)body.scrollTop=body.scrollHeight   // chat-style: follow the newest unless reading back
+  // write-on-change: identical feed HTML is left alone (scroll untouched)
+  if(setHtml('dbody',evs||'<span class="badge">no parsed events in the tail window yet</span>')&&(!hadContent||nearBottom))body.scrollTop=body.scrollHeight   // chat-style: follow the newest unless reading back
 }
 async function refresh(){
   data=await q('/api/runs')
@@ -479,9 +607,9 @@ async function refresh(){
 function pick(id){
   selTail=null;sel=id;render()
   document.getElementById('detail').classList.add('open')
-  document.getElementById('dtitle').innerHTML='<h2>'+esc(id)+'</h2>'
-  document.getElementById('dbody').innerHTML='<span class="badge">loading…</span>'
-  document.getElementById('dfoot').innerHTML=''
+  setHtml('dtitle','<h2>'+esc(id)+'</h2>')
+  setHtml('dbody','<span class="badge">loading…</span>')
+  setHtml('dfoot','')
   document.getElementById('dbody').scrollTop=0
   loadDetail(id)
 }
@@ -489,25 +617,57 @@ function pickTail(runId,agentId){
   sel=null;selTail={runId,agentId};render()
   // instant feedback: open with a placeholder before the fetch resolves
   document.getElementById('detail').classList.add('open')
-  document.getElementById('dtitle').innerHTML='<h2>agent '+esc(agentId.slice(0,10))+'…</h2><div class="mut">'+esc(runId)+'</div>'
-  document.getElementById('dbody').innerHTML='<span class="badge">loading agent feed…</span>'
-  document.getElementById('dfoot').innerHTML=''
+  setHtml('dtitle','<h2>agent <span class="badge">('+esc(shortAg(agentId))+')</span></h2><div class="mut">'+esc(runId)+'</div>')
+  setHtml('dbody','<span class="badge">loading agent feed…</span>')
+  setHtml('dfoot','')
   loadTail(runId,agentId)
 }
 function closeDrawer(){if(sel==null&&selTail==null)return;sel=null;selTail=null;document.getElementById('detail').classList.remove('open');render()}
 // Run summary panel (ⓘ icon). Agent listing lives in the table sub-rows —
 // not repeated here.
+// In-flight run macro view: phase plan with the current phase inferred, then
+// an agent roster (title (shortid) · state chip · current action).
+function liveDetailHtml(r){
+  const agents=r.agents||[]
+  const drift=Date.now()-liveAt
+  const act=agents.filter(a=>a.state==='running').sort((x,y)=>new Date(y.lastActivityAt||0)-new Date(x.lastActivityAt||0))
+  const curPhase=(act[0]&&act[0].phaseTitle)||null
+  let h='<div class="goal"><b>phase</b>'+esc(curPhase??'phase ?')
+  if(Array.isArray(r.phases)&&r.phases.length)
+    h+=r.phases.map(p=>{const on=curPhase===p.title;return '<div'+(on?' style="color:var(--acc)"':' class="badge"')+'>'+(on?'▶ ':'· ')+esc(p.title)+'</div>'}).join('')
+  h+='</div>'
+  for(const a of agents){
+    const b=agentBadge(a,drift)
+    h+='<div class="agent"><span class="'+b.dot+'"></span><b>'+nameCell(a.title??null,shortAg(a.agentId))+'</b> <span class="s '+b.statusCls+'">'+esc(b.statusText)+'</span><span class="mut" style="white-space:nowrap;word-break:normal;overflow:hidden;text-overflow:ellipsis">'+esc(actionText(a.currentAction))+'</span></div>'
+  }
+  if(!agents.length)h+='<div class="badge">no agents seen yet</div>'
+  return h
+}
 async function loadDetail(id){
   const run=await q('/api/run/'+encodeURIComponent(id))
   if(sel!==id)return
-  document.getElementById('dtitle').innerHTML=run.found===false
-    ?'<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet</div>'
-    :'<h2>'+esc(run.workflowName??id)+'</h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+' · '+fmt(run.agentCount)+' agents</div>'
-  document.getElementById('dbody').innerHTML=run.found===false
-    ?'<span class="badge">expand the row to see live agents</span>'
-    :(run.error?'<div class="goal"><b>error</b>'+esc(run.error)+'</div>':'')+
-     (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'<span class="badge">no result recorded</span>')
-  document.getElementById('dfoot').innerHTML=run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':''
+  if(run.found===false){
+    // recordless = in flight: render the live macro view from /api/live
+    // (cached server-side), not a one-line cop-out
+    let lr=null
+    try{const d=await q('/api/live');if(d&&Array.isArray(d.active))lr=d.active.find(x=>x.runId===id)||null}catch{}
+    if(sel!==id)return
+    if(lr){
+      const n=(lr.agents||[]).length
+      setHtml('dtitle','<h2>'+esc(lr.name??'—')+' <span class="badge">('+esc(shortRun(id))+')</span></h2><div class="mut">in flight · '+n+' agent'+(n===1?'':'s')+'</div>')
+      setHtml('dbody',liveDetailHtml(lr))
+      setHtml('dfoot',lr.description?'<div class="goal"><b>goal</b>'+esc(lr.description)+'</div>':'')
+    }else{
+      setHtml('dtitle','<h2>'+esc(id)+'</h2><div class="mut">in flight — no terminal record yet</div>')
+      setHtml('dbody','<span class="badge">expand the row to see live agents</span>')
+      setHtml('dfoot','')
+    }
+    return
+  }
+  setHtml('dtitle','<h2>'+esc(run.workflowName??'—')+' <span class="badge">('+esc(shortRun(id))+')</span></h2><div class="mut">'+esc(id)+' · '+esc(run.status)+' · '+fmt(run.totalTokens)+' tokens · '+dur(run.durationMs)+' · '+fmt(run.agentCount)+' agents</div>')
+  setHtml('dbody',(run.error?'<div class="goal"><b>error</b>'+esc(run.error)+'</div>':'')+
+    (run.resultPreview?'<pre>'+esc(run.resultPreview)+(run.resultTruncated?'\\n… (truncated)':'')+'</pre>':'<span class="badge">no result recorded</span>'))
+  setHtml('dfoot',run.summary?'<div class="goal"><b>goal</b>'+esc(run.summary)+'</div>':'')
 }
 // pointerdown, not click: fires before any re-render can replace the target.
 document.getElementById('rows').addEventListener('pointerdown',e=>{
@@ -546,6 +706,13 @@ document.getElementById('themec').addEventListener('click',()=>{
   themePref=themePref==='ide'?'light':themePref==='light'?'dark':'ide'
   localStorage.setItem('themePref',themePref);applyTheme()
 })
+const aiBtn=document.getElementById('aisum')
+function aiLbl(){aiBtn.textContent='AI summaries: '+(aiOn?'on':'off')}
+aiBtn.addEventListener('click',()=>{
+  aiOn=!aiOn;localStorage.setItem('aiSum',aiOn?'on':'off');aiLbl()
+  if(selTail)loadTail(selTail.runId,selTail.agentId)
+})
+aiLbl()
 document.getElementById('close').addEventListener('click',closeDrawer)
 addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()})
 const es=new EventSource('/events?t='+T)
@@ -574,6 +741,7 @@ server.listen(PORT, '127.0.0.1', async () => {
   // applies on creation, and both paths may pre-exist with looser modes.
   await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
   await fs.chmod(DATA_DIR, 0o700).catch(() => {})
+  await loadSummaries()
   const stateFile = path.join(DATA_DIR, 'dashboard.json')
   await fs.writeFile(stateFile,
     JSON.stringify({ pid: process.pid, port: PORT, token: TOKEN, startedAt: new Date().toISOString(), version: VERSION }),

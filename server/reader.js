@@ -291,6 +291,7 @@ export async function getAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR } = 
             tokens: e.tokens ?? null, toolCalls: e.toolCalls ?? null,
             durationMs: e.durationMs ?? null, resultPreview: e.resultPreview ?? null,
             promptPreview: e.promptPreview ?? null,
+            title: deriveTitle(e.label ?? null, e.promptPreview ?? null),
             source: 'record',
           })
         }
@@ -367,7 +368,7 @@ const FRESH_WINDOW_MS = 10 * 1000
 // Reads at most the last maxBytes; drops the leading partial line when the
 // window starts mid-file and any torn (in-progress) trailing line.
 export async function parseTranscriptTail(filePath, { maxBytes = 65536, maxEvents = 30 } = {}) {
-  const out = { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null, model: null }
+  const out = { events: [], firstTimestamp: null, lastTimestamp: null, outputTokens: null, currentAction: null, model: null, stats: { events: 0, toolCounts: {} } }
   let text = null
   let startedMidFile = false
   let fh = null
@@ -425,6 +426,13 @@ export async function parseTranscriptTail(filePath, { maxBytes = 65536, maxEvent
     }
   }
   out.outputTokens = tokens
+  // Window-wide stats: every parsed event counts, not just the maxEvents kept.
+  const toolCounts = {}
+  for (const e of events) {
+    if (e.kind !== 'tool' || typeof e.tool !== 'string') continue
+    toolCounts[e.tool] = (Object.hasOwn(toolCounts, e.tool) ? toolCounts[e.tool] : 0) + 1
+  }
+  out.stats = { events: events.length, toolCounts }
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i].kind === 'tool' || events[i].kind === 'text') { out.currentAction = events[i]; break }
   }
@@ -488,6 +496,57 @@ export function parsePhases(scriptSource) {
   } catch { return [] }
 }
 
+// Extract meta.description from a workflow script's `export const meta = {...}`
+// WITHOUT executing it — same tolerant scan as parsePhases. null when absent
+// or unparseable.
+export function parseMetaDescription(scriptSource) {
+  try {
+    if (typeof scriptSource !== 'string') return null
+    const metaStart = scriptSource.search(/export\s+const\s+meta\s*=\s*\{/)
+    if (metaStart < 0) return null
+    const metaBody = scanBalanced(scriptSource, scriptSource.indexOf('{', metaStart), '{', '}')
+    if (metaBody === null) return null
+    return stringProp(metaBody, 'description')
+  } catch { return null }
+}
+
+const TITLE_MAX = 42
+
+// Best human name for an agent. An explicit label always wins; otherwise the
+// title is distilled from the agent's task prompt (first sentence/clause,
+// markdown stripped, paths collapsed to basenames, boilerplate dropped,
+// trimmed to TITLE_MAX on a word boundary). null when neither is usable.
+// Never throws — this feeds display rows that must degrade per-record.
+export function deriveTitle(label, prompt) {
+  try {
+    if (typeof label === 'string' && label.trim()) return label.trim()
+    if (typeof prompt !== 'string') return null
+    let s = prompt
+      .replace(/^#{1,6}\s+/gm, '')                           // markdown headings
+      .replace(/[`*]/g, '')                                  // backticks, emphasis
+    s = s.split('\n').map(l => l.trim()).find(l => l) ?? ''
+    if (!s) return null
+    // Leading boilerplate carries no identity — drop it (a couple of passes
+    // handles stacked prefixes like "Step by step, you are ...").
+    const boilerplate = /^(?:step by step[,:.\s]+|you are\s+|do (?:these|the following) steps[,:.\s]*|please\s+)/i
+    for (let i = 0; i < 3 && boilerplate.test(s); i++) s = s.replace(boilerplate, '')
+    // Absolute and ~ paths collapse to their basename.
+    s = s.replace(/(?:~|\/)[^\s`'"()[\]{}]*\/+([^\s`'"()[\]{}/]+)/g, '$1')
+    // First sentence; failing that, first clause before an em-dash/semicolon.
+    const sentence = s.match(/^(.*?[.!?])(?:\s|$)/)
+    s = sentence ? sentence[1] : s.split(/\s+[—–]\s+|;\s+/)[0]
+    s = s.replace(/[\s.,;:!?—-]+$/, '').trim()
+    if (!/[A-Za-z0-9]/.test(s)) return null
+    if (s.length > TITLE_MAX) {
+      let cut = s.slice(0, TITLE_MAX - 1)
+      const sp = cut.lastIndexOf(' ')
+      if (sp > 0) cut = cut.slice(0, sp)
+      s = cut.replace(/[\s.,;:!?—-]+$/, '') + '…'
+    }
+    return s
+  } catch { return null }
+}
+
 // Live merge for one run. Priority: journal started/result pairing (state) →
 // hook events log (precise startedAt) → transcript stat + tail (activity,
 // current action, token burn, fallback startedAt). Script source is parsed
@@ -548,6 +607,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
     a.currentAction = tail.currentAction
     a.outputTokens = tail.outputTokens
     a.model = tail.model
+    a.stats = tail.stats
     a.promptPreview = await readTranscriptPrompt(a.transcriptPath)
     if (!a.startedAt && tail.firstTimestamp) a.startedAt = tail.firstTimestamp  // window start ≈ start; hook data is preferred
   }
@@ -573,11 +633,17 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
       outputTokens: a.outputTokens,
       model: a.model ?? null,
       promptPreview: a.promptPreview ?? null,
+      title: deriveTitle(null, a.promptPreview ?? null),    // labels don't exist live
+      stats: a.stats ?? null,
       transcriptPath: a.transcriptPath,
     }
   })
 
-  return { runId, found, phases, workflowName, agents: rows, script: undefined }
+  return {
+    runId, found, phases, workflowName,
+    description: src.found ? parseMetaDescription(src.script) : null,
+    agents: rows, script: undefined,
+  }
 }
 
 // The agent's goal: its task prompt is the FIRST line of its transcript
