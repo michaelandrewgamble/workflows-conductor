@@ -346,6 +346,7 @@ export async function getAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR } = 
       if (!m) continue
       const a = agents.get(m[1]) ?? { agentId: m[1], source: 'transcript' }
       a.transcriptPath = path.join(dir, f.name)   // path only — never inlined
+      a.agentType = await readAgentType(a.transcriptPath)
       agents.set(m[1], a)
     }
   }
@@ -648,7 +649,7 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
   const labelPairs = src.found ? parseAgentLabels(src.script) : []
   const workflowName = src.found ? (src.script.match(/name:\s*['"]([^'"]+)['"]/)?.[1] ?? null) : null
 
-  const rows = [...agents.values()].map(a => {
+  const rows = await Promise.all([...agents.values()].map(async a => {
     const startedMs = a.startedAt ? Date.parse(a.startedAt) : NaN
     const lastMs = a.lastActivityAt ? Date.parse(a.lastActivityAt) : NaN
     const endMs = a.state === 'running' ? now : lastMs
@@ -663,13 +664,14 @@ export async function getLiveAgents(runId, { projectsDir = DEFAULT_PROJECTS_DIR,
       currentAction: a.currentAction,
       outputTokens: a.outputTokens,
       model: a.model ?? null,
+      agentType: a.transcriptPath ? await readAgentType(a.transcriptPath) : null,
       promptPreview: a.promptPreview ?? null,
       title: null,                 // resolved below (deep-read label match, cached)
       titleSource: 'label',
       stats: a.stats ?? null,
       transcriptPath: a.transcriptPath,
     }
-  })
+  }))
 
   for (const r of rows) {
     if (!r.title && labelPairs.length && r.transcriptPath) {
@@ -766,6 +768,18 @@ export function disambiguateTitles(agents) {
       if (!adopted) g.forEach((a, i) => { a.title = a.title ? a.title + ' #' + (i + 1) : '#' + (i + 1) })
     }
   } catch { /* titles are cosmetic - never break the listing */ }
+}
+
+// The agent's subagent type (e.g. 'change-manager') lives in the sibling
+// agent-<id>.meta.json the CLI writes at spawn. Immutable — cached forever.
+const agentTypeCache = new Map()
+export async function readAgentType(transcriptPath) {
+  if (!transcriptPath) return null
+  if (agentTypeCache.has(transcriptPath)) return agentTypeCache.get(transcriptPath)
+  const parsed = await parseJsonFile(transcriptPath.replace(/\.jsonl$/, '.meta.json'))
+  const t = parsed.ok && typeof parsed.value?.agentType === 'string' && parsed.value.agentType.trim() ? parsed.value.agentType.trim() : null
+  if (parsed.ok) agentTypeCache.set(transcriptPath, t)   // missing file may appear later
+  return t
 }
 
 // The agent's goal: its task prompt is the FIRST line of its transcript
