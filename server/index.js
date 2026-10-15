@@ -31,7 +31,7 @@ async function probe(state) {
 function urlOf(state) { return `http://127.0.0.1:${state.port}/?t=${state.token}` }
 function openBrowser(url) {
   if (process.platform === 'darwin') spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
-  else if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref()
+  else if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
   else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
 }
 
@@ -59,7 +59,7 @@ async function startDashboard({ open = true } = {}) {
   // Detached + stdio ignored: must never touch this process's MCP stdio
   // channel, and must survive this MCP server (which dies with the session).
   const child = spawn(process.execPath, [path.join(HERE, 'dashboard.js')], {
-    detached: true, stdio: 'ignore',
+    detached: true, stdio: 'ignore', windowsHide: true,
     env: { ...process.env, CONDUCTOR_TOKEN: token, CONDUCTOR_PORT: String(port), CONDUCTOR_DATA_DIR: DATA_DIR },
   })
   child.unref()

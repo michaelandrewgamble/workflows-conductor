@@ -163,7 +163,7 @@ function summarizeViaCli(prompt) {
       // --setting-sources '': without it the CLI loads the user's settings,
       // plugins and MCP servers — measured to hang past 30s. --disallowed-tools:
       // the goal text embeds an agent task; the summarizer must never act on it.
-      child = spawn('claude', ['-p', prompt, '--model', 'haiku', '--setting-sources', '', '--disallowed-tools', '*'], { cwd: os.homedir(), stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawn('claude', ['-p', prompt, '--model', 'haiku', '--setting-sources', '', '--disallowed-tools', '*'], { cwd: os.homedir(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     } catch (err) { return reject(err) }
     const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } settle(reject, new Error('timeout' + (errBuf ? ' stderr:' + errBuf.trim().slice(0, 200) : ''))) }, 75_000)
     let out = ''
